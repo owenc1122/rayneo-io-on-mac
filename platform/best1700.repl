@@ -19,8 +19,17 @@ flash: Memory.MappedMemory @ { sysbus 0x10000000; sysbus 0x30000000 }
 psram: Memory.MappedMemory @ { sysbus 0x18000000; sysbus 0x38000000 }
     size: 0x4000000
 
+// AP SRAM, 16 MiB at 0x20000000 with the device alias at 0x21000000 (addr_remap_cpu_to_dev).
+// Split in three so the M55C1 core can see its windows (dsp_m55c1_addr_cpu_to_dev):
+//   M55C1 0x20000000-0x203fffff = AP 0x20c00000-0x20ffffff, M55C1 0x0-0x1fffff = AP 0x20e00000-.
 sram: Memory.MappedMemory @ { sysbus 0x20000000; sysbus 0x21000000 }
-    size: 0x400000
+    size: 0xc00000
+
+sramC1Data: Memory.MappedMemory @ { sysbus 0x20c00000; sysbus 0x21c00000; sysbus new Bus.BusPointRegistration { address: 0x20000000; cpu: c1 } }
+    size: 0x200000
+
+sramC1Tcm: Memory.MappedMemory @ { sysbus 0x20e00000; sysbus 0x21e00000; sysbus new Bus.BusPointRegistration { address: 0x0; cpu: c1 }; sysbus new Bus.BusPointRegistration { address: 0x20200000; cpu: c1 } }
+    size: 0x200000
 
 shared: Memory.MappedMemory @ sysbus 0x23c00000
     size: 0x100000
@@ -47,6 +56,7 @@ aonCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40080000
     alwaysOn: true
     bluetoothCpu: btc
     bluetoothHostCpu: bth
+    coreOneCpu: c1
 
 sysCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40000000
     APReceive0 -> nvic@104
@@ -67,14 +77,33 @@ sysCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40000000
     BTCTransmit3 -> btcNvic@35
     // hal_rmt_ipc_rx_irq_handler walks cfg+0x20 (rx IRQ list): AP 0x60,0x61; BTH 0x49,0x4a.
     // cfg+0x24 is the tx-done list: AP 0x5e,0x5f; BTH 0x41,0x42.
-    BTHAPReceive0 -> nvic@96
-    BTHAPReceive1 -> nvic@97
-    BTHAPTransmit0 -> nvic@94
-    BTHAPTransmit1 -> nvic@95
-    BTHReceive0 -> bthNvic@73
-    BTHReceive1 -> bthNvic@74
-    BTHTransmit0 -> bthNvic@65
-    BTHTransmit1 -> bthNvic@66
+    LaneARx0 -> nvic@96
+    LaneARx1 -> nvic@97
+    LaneATx0 -> nvic@94
+    LaneATx1 -> nvic@95
+    LaneBRx0 -> bthNvic@73
+    LaneBRx1 -> bthNvic@74
+    LaneBTx0 -> bthNvic@65
+    LaneBTx1 -> bthNvic@66
+    // M55C1<->BTH lanes 2/3: M55C1 cfg rx 0x60,0x61 / tx 0x5e,0x5f; BTH rx 0x4b,0x4c / tx 0x43,0x44
+    LaneARx2 -> c1Nvic@96
+    LaneARx3 -> c1Nvic@97
+    LaneATx2 -> c1Nvic@94
+    LaneATx3 -> c1Nvic@95
+    LaneBRx2 -> bthNvic@75
+    LaneBRx3 -> bthNvic@76
+    LaneBTx2 -> bthNvic@67
+    LaneBTx3 -> bthNvic@68
+    // AP<->M55C1: both cfgs list rx 0x58,0x59 / tx 0x5b,0x5c
+    CoreOneToAPRx0 -> nvic@88
+    CoreOneToAPRx1 -> nvic@89
+    CoreOneToAPTx0 -> nvic@91
+    CoreOneToAPTx1 -> nvic@92
+    APToCoreOneRx0 -> c1Nvic@88
+    APToCoreOneRx1 -> c1Nvic@89
+    APToCoreOneTx0 -> c1Nvic@91
+    APToCoreOneTx1 -> c1Nvic@92
+    coreOneCpu: c1
 
 ispi: SPI.BES1700_ISPI @ sysbus 0x4000a000
 
@@ -157,6 +186,8 @@ i2c2: I2C.DesignWare_APB_I2C @ sysbus 0x40075000
 panelPower: Miscellaneous.BES1700_I2CRegisters @ i2c2 0x70
 
 gpu: Video.BES1700_GPU @ sysbus 0x401f0000
+    // gpu_hal_init: nuttx_irq_attach(0x21)
+    IRQ -> nvic@33
 
 led: Miscellaneous.BES1700_I2CRegisters @ i2c1 0x30
     idAddress: 0
@@ -205,3 +236,16 @@ bthDma1: DMA.BES1700_DMA @ sysbus 0x50130000
 // Head-tracking IMU probed by the BTH ("lsm6dso32", WHO_AM_I 0x6C). Renode's LSM6DSO
 // model stands in for the LSM6DSO32; the I2C address is an assumption.
 bthImu: Sensors.LSM6DSO_IMU @ bthI2c1 0x6a
+
+// Second M55 core of the AP subsystem ("M55C1", nuttx_apc1.bin: CHIP_ROLE=CP), runs the
+// bluetoothd RPC server. Started by cp_subsys_open via AON +0xb4/+0x1a4.
+c1: CPU.CortexM @ sysbus
+    cpuType: "cortex-m55"
+    numberOfMPURegions: 17
+    nvic: c1Nvic
+    init:
+        IsHalted true
+
+c1Nvic: IRQControllers.BES1700_PPBExemptNVIC @ sysbus new Bus.BusPointRegistration { address: 0xe000e000; cpu: c1 }
+    systickFrequency: 16384
+    IRQ -> c1@0

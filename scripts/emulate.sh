@@ -18,7 +18,13 @@ renode=${RENODE:-$root/.local/renode/Renode.app/Contents/MacOS/renode}
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 python3 scripts/make-flash-image.py "$fwdir" "$out/flash" > "$out/flash-layout.log"
+# NAND resource partitions (littlefs). Optional fonts: FONTS=<dir with .ttf> (factory fonts are not in the OTA set).
+if [ -x .local/venv/bin/python ]; then
+    .local/venv/bin/python scripts/make-nand-image.py "$fwdir" "$out/nand" ${FONTS:+--fonts "$FONTS" --substitute} > "$out/nand-layout.log"
+else
+    echo 'note: run scripts/setup-tools.sh to build the NAND resource image' >&2
+fi
 python3 scripts/make-resc.py "$root" "$out" "$duration" "$extra" > "$out/boot.resc"
 "$renode" --disable-gui --console --plain -e "include @$out/boot.resc" > "$out/boot.log" 2>&1 < /dev/null || true
-grep -E '^\[AP|^\[BTH|BTH released|BTC released|Scanout' "$out/boot.log" | tail -40
+grep -E '^\[AP|^\[BTH|^\[C1|M55C1 released|BTH released|BTC released|Scanout' "$out/boot.log" | tail -40
 echo "log: $out/boot.log"

@@ -1,19 +1,21 @@
 # Minimal printf formatter for Renode hooks (IronPython 2.7). Reads a format
 # string and a va_list argument area from emulated memory. Used for trace only.
 import struct as _st
+_ctx = [None]  # CPU whose address map is used (cores with private windows, e.g. M55C1)
 def _rd32(bus, a):
-    return bus.ReadDoubleWord(a) & 0xffffffff
+    return bus.ReadDoubleWord(a, _ctx[0]) & 0xffffffff
 def _cstr(bus, a, limit=256):
     if a == 0 or a < 0x100000:
         return '(null)'
     out = []
     for i in range(limit):
-        c = bus.ReadByte(a + i)
+        c = bus.ReadByte(a + i, _ctx[0])
         if c == 0:
             break
         out.append(chr(c) if (c == 10 or 32 <= c < 127) else '.')
     return ''.join(out)
-def fw_format(bus, fmt_addr, ap):
+def fw_format(bus, fmt_addr, ap, ctx=None):
+    _ctx[0] = ctx
     fmt = _cstr(bus, fmt_addr, 512)
     res = []
     i = 0

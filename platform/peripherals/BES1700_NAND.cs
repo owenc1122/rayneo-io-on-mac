@@ -108,6 +108,20 @@ namespace Antmicro.Renode.Peripherals.SPI
         }
         private bool pendingLoad;
         private uint pendingCommand;
+        // Loads a raw data image (2048 bytes per page, no spare area) such as the one
+        // produced by scripts/make-nand-image.py. All-0xFF pages stay erased; spare = 0xFF.
+        public void LoadImage(string path) {
+            var data=System.IO.File.ReadAllBytes(path);
+            int loaded=0;
+            for(uint page=0;page<PageCount && (page+1)*2048<=data.Length;page++) {
+                int start=(int)(page*2048);bool erased=true;
+                for(int i=0;i<2048;i++) if(data[start+i]!=0xff) {erased=false;break;}
+                if(erased) continue;
+                var target=new byte[PageSize];FillErased(target);Array.Copy(data,start,target,0,2048);
+                pages[page]=target;loaded++;
+            }
+            this.Log(LogLevel.Info,"Loaded {0} programmed pages from {1}",loaded,path);
+        }
         public byte ReadCache(long offset) {return offset>=0 && offset<PageSize?cache[(int)offset]:(byte)0xff;}
         private void ResetDevice(){Array.Clear(features,0,features.Length);features[0xa0]=0x38;features[0xb0]=0x10;FillErased(cache);}
         private static void FillErased(byte[] data){for(int i=0;i<data.Length;i++)data[i]=0xff;}
