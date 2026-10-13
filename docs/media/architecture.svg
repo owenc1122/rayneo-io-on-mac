@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+<defs>
+<marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8A919C"/></marker>
+<style>
+.box{fill:#161A20;stroke:#3A4049;stroke-width:1.5}
+.t{fill:#E8EBF0;font-size:17px;font-weight:600}
+.s{fill:#9AA1AC;font-size:13px}
+.m{fill:#9AA1AC;font-size:12.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.ok{fill:#22E05A}.wip{fill:#FFA42E}.no{fill:#5B626D}
+.l{stroke:#8A919C;stroke-width:1.6;fill:none}
+</style>
+</defs>
+<rect width="1200" height="560" rx="18" fill="#0C0E11"/>
+<!-- user files -->
+<rect class="box" x="30" y="40" width="250" height="150" rx="12" stroke-dasharray="6 5"/>
+<text class="t" x="50" y="72">Your own firmware</text>
+<text class="s" x="50" y="96">never bundled · stays in .local/</text>
+<text class="m" x="50" y="126">.local/firmware.bin (AP)</text>
+<text class="m" x="50" y="148">OTA files + OtaFileInfo.json</text>
+<text class="m" x="50" y="170">read only, never patched</text>
+<!-- scripts -->
+<rect class="box" x="30" y="250" width="250" height="150" rx="12"/>
+<text class="t" x="50" y="282">scripts/</text>
+<text class="m" x="50" y="310">make-flash-image.py</text>
+<text class="s" x="50" y="328">OTA files → installed flash image</text>
+<text class="m" x="50" y="356">make-resc.py · emulate.sh</text>
+<text class="s" x="50" y="374">generate + run Renode scenario</text>
+<path class="l" d="M155 190 V248" marker-end="url(#ar)"/>
+<!-- renode -->
+<rect x="330" y="40" width="530" height="480" rx="14" fill="#10141A" stroke="#22E05A" stroke-opacity=".5" stroke-width="1.5"/>
+<text class="t" x="352" y="72">Renode (installed separately, MIT)</text>
+<text class="m" x="352" y="94">platform/best1700.repl + platform/peripherals/*.cs</text>
+<!-- cpus -->
+<rect class="box" x="352" y="112" width="236" height="82" rx="10"/>
+<circle class="ok" cx="372" cy="138" r="6"/><text class="t" x="386" y="144">AP core · NuttX</text>
+<text class="s" x="372" y="172">boots kernel, runs board init</text>
+<rect class="box" x="604" y="112" width="236" height="82" rx="10"/>
+<circle class="wip" cx="624" cy="138" r="6"/><text class="t" x="638" y="144">BTH subsystem</text>
+<text class="s" x="624" y="172">bring-up in progress</text>
+<rect class="box" x="352" y="208" width="236" height="62" rx="10"/>
+<circle class="ok" cx="372" cy="232" r="6"/><text class="t" x="386" y="238">BTC controller</text>
+<text class="s" x="386" y="258">code executes</text>
+<rect class="box" x="604" y="208" width="236" height="62" rx="10"/>
+<circle class="no" cx="624" cy="232" r="6"/><text class="t" x="638" y="238">Other cores · IPC</text>
+<text class="s" x="638" y="258">not yet modelled</text>
+<!-- buses -->
+<rect x="352" y="286" width="488" height="30" rx="8" fill="#1E242C"/>
+<text class="m" x="596" y="306" text-anchor="middle">system bus · interrupts · DMA</text>
+<!-- peripherals -->
+<g>
+<rect class="box" x="352" y="330" width="154" height="82" rx="10"/>
+<circle class="ok" cx="370" cy="352" r="5"/><text class="t" x="382" y="358" style="font-size:15px">Storage</text>
+<text class="s" x="370" y="380">NOR · NAND</text>
+<text class="s" x="370" y="398">PSRAM · DMA</text>
+<rect class="box" x="519" y="330" width="154" height="82" rx="10"/>
+<circle class="ok" cx="537" cy="352" r="5"/><text class="t" x="549" y="358" style="font-size:15px">Display</text>
+<text class="s" x="537" y="380">LCDC scan-out</text>
+<text class="s" x="537" y="398">panel SPI · LCD DMA</text>
+<rect class="box" x="686" y="330" width="154" height="82" rx="10"/>
+<circle class="ok" cx="704" cy="352" r="5"/><text class="t" x="716" y="358" style="font-size:15px">Board I/O</text>
+<text class="s" x="704" y="380">GPIO · SPI · I2C</text>
+<text class="s" x="704" y="398">UART · clocks · OTS</text>
+<rect class="box" x="352" y="426" width="238" height="74" rx="10"/>
+<circle class="wip" cx="370" cy="448" r="5"/><text class="t" x="382" y="454" style="font-size:15px">GPU</text>
+<text class="s" x="370" y="478">init registers only, no drawing</text>
+<rect class="box" x="602" y="426" width="238" height="74" rx="10"/>
+<circle class="no" cx="620" cy="448" r="5"/><text class="t" x="632" y="454" style="font-size:15px">Input · resource FS</text>
+<text class="s" x="620" y="478">not yet implemented</text>
+</g>
+<path class="l" d="M280 325 H328" marker-end="url(#ar)"/>
+<!-- viewer -->
+<rect class="box" x="910" y="160" width="260" height="200" rx="12" stroke="#2E8BFF" stroke-opacity=".6"/>
+<text class="t" x="930" y="192">Mac viewer (Swift)</text>
+<text class="m" x="930" y="216">Sources/RayNeoSimulator</text>
+<text class="s" x="930" y="246">launches the headless run,</text>
+<text class="s" x="930" y="266">decodes the frame the</text>
+<text class="s" x="930" y="286">emulated LCDC scanned out,</text>
+<text class="s" x="930" y="306">shows it in a native window</text>
+<text class="m" x="930" y="338">.local/runs/ui-*/frame.pgm</text>
+<path class="l" d="M673 371 C780 371 800 300 906 300" marker-end="url(#ar)"/>
+<text class="s" x="752" y="352" style="font-size:12px">frame buffer</text>
+<path class="l" d="M906 220 C870 220 880 140 862 140" marker-end="url(#ar)"/>
+<text class="s" x="866" y="128" style="font-size:12px">start run</text>
+<!-- legend -->
+<g transform="translate(910,410)">
+<text class="t" x="0" y="0" style="font-size:14px">Legend</text>
+<circle class="ok" cx="8" cy="24" r="6"/><text class="s" x="22" y="29">working (initial model)</text>
+<circle class="wip" cx="8" cy="50" r="6"/><text class="s" x="22" y="55">partial / in progress</text>
+<circle class="no" cx="8" cy="76" r="6"/><text class="s" x="22" y="81">not started</text>
+</g>
+</svg>

@@ -1,0 +1,185 @@
+// Initial AP board model. Unimplemented peripherals remain explicit bus faults/logs.
+// Memory sizes are inferred from the local 1.0.4.12 AP image; not an official BSP.
+cpu: CPU.CortexM @ sysbus
+    cpuType: "cortex-m55"
+    numberOfMPURegions: 16
+    nvic: nvic
+
+nvic: IRQControllers.NVIC @ sysbus new Bus.BusPointRegistration { address: 0xe000e000; cpu: cpu }
+    // The stock oneshot driver converts elapsed ticks at 16384 Hz.
+    systickFrequency: 16384
+    IRQ -> cpu@0
+
+itcm: Memory.MappedMemory @ sysbus 0x00100000
+    size: 0x100000
+
+flash: Memory.MappedMemory @ { sysbus 0x10000000; sysbus 0x30000000 }
+    size: 0x2000000
+
+psram: Memory.MappedMemory @ { sysbus 0x18000000; sysbus 0x38000000 }
+    size: 0x4000000
+
+sram: Memory.MappedMemory @ { sysbus 0x20000000; sysbus 0x21000000 }
+    size: 0x400000
+
+shared: Memory.MappedMemory @ sysbus 0x23c00000
+    size: 0x100000
+
+// BTH SRAM. Size from the BTH MPU table (regions 0x03000000/0x23000000, 0x260000);
+// MSP=0x230defe0, the AP builds the BTH boot vector at 0x230dff00 and the second
+// AP<->BTH mailbox lives at 0x2319ffe8. 0x03000000 is the executable alias.
+bootSram: Memory.MappedMemory @ { sysbus 0x23000000; sysbus 0x03000000 }
+    size: 0x260000
+
+// Second NOR flash (hal_norflash_addr_to_id: id 1 = 0x08000000/0x28000000).
+// It holds the installed BTH image (see scripts/make-flash-image.py). BTH code is
+// linked at 0x0c000000 and copies .data from 0x2c000000; these are treated as
+// further aliases of the same device (inferred, not from a datasheet).
+flash1: Memory.MappedMemory @ { sysbus 0x08000000; sysbus 0x28000000; sysbus 0x0c000000; sysbus 0x2c000000 }
+    size: 0x1000000
+
+nor1: SPI.BES1700_NOR @ sysbus 0x50140000
+    jedec: 0xc86018
+    flashBase: 0x28000000
+    flashSize: 0x1000000
+
+aonCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40080000
+    alwaysOn: true
+    bluetoothCpu: btc
+    bluetoothHostCpu: bth
+
+sysCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40000000
+    APReceive0 -> nvic@104
+    BTCReceive0 -> btcNvic@19
+    APReceive1 -> nvic@105
+    BTCReceive1 -> btcNvic@18
+    APReceive2 -> nvic@43
+    BTCReceive2 -> btcNvic@36
+    APReceive3 -> nvic@119
+    BTCReceive3 -> btcNvic@37
+    APTransmit0 -> nvic@102
+    BTCTransmit0 -> btcNvic@17
+    APTransmit1 -> nvic@103
+    BTCTransmit1 -> btcNvic@16
+    APTransmit2 -> nvic@29
+    BTCTransmit2 -> btcNvic@34
+    APTransmit3 -> nvic@30
+    BTCTransmit3 -> btcNvic@35
+    // hal_rmt_ipc_rx_irq_handler walks cfg+0x20 (rx IRQ list): AP 0x60,0x61; BTH 0x49,0x4a.
+    // cfg+0x24 is the tx-done list: AP 0x5e,0x5f; BTH 0x41,0x42.
+    BTHAPReceive0 -> nvic@96
+    BTHAPReceive1 -> nvic@97
+    BTHAPTransmit0 -> nvic@94
+    BTHAPTransmit1 -> nvic@95
+    BTHReceive0 -> bthNvic@73
+    BTHReceive1 -> bthNvic@74
+    BTHTransmit0 -> bthNvic@65
+    BTHTransmit1 -> bthNvic@66
+
+ispi: SPI.BES1700_ISPI @ sysbus 0x4000a000
+
+nor: SPI.BES1700_NOR @ sysbus 0x40190000
+
+psramPhy: Memory.BES1700_PSRAM @ sysbus 0x40328000
+    phy: true
+
+psramController: Memory.BES1700_PSRAM @ sysbus 0x40320000
+
+dma: DMA.BES1700_DMA @ sysbus 0x401a0000
+    IRQ -> nvic@37
+
+uart: UART.BES1700_UART @ sysbus 0x4000b000
+
+dwt: Miscellaneous.DWT @ sysbus 0xe0001000
+    frequency: 240000000
+
+i2c0: I2C.DesignWare_APB_I2C @ sysbus 0x40006000
+
+i2c1: I2C.DesignWare_APB_I2C @ sysbus 0x40007000
+
+ots: Sensors.BES1700_OTS @ i2c0 0x74
+
+nand: SPI.BES1700_NAND @ sysbus 0x40198000
+    RxRequest -> dma@0
+
+nandCache: SPI.BES1700_NANDCache @ sysbus 0x34000000
+    controller: nand
+
+btc: CPU.CortexM @ sysbus
+    cpuType: "cortex-m4"
+    nvic: btcNvic
+    init:
+        IsHalted true
+
+btcNvic: IRQControllers.NVIC @ sysbus new Bus.BusPointRegistration { address: 0xe000e000; cpu: btc }
+    systickFrequency: 16384
+    IRQ -> btc@0
+
+btcCode: Memory.MappedMemory @ { sysbus 0x68400000; sysbus 0x60400000 }
+    size: 0x100000
+
+btcRam: Memory.MappedMemory @ sysbus 0x68000000
+    size: 0x40000
+
+btcExchange: Memory.MappedMemory @ sysbus 0x6d020000
+    size: 0x20000
+
+btcRadio: Miscellaneous.BES1700_BTController @ sysbus 0x6d040000
+
+btcModem: Miscellaneous.BES1700_BTController @ sysbus 0x6d060000
+
+btcCmu: Miscellaneous.BES1700_BTCClockControl @ sysbus 0x6e030000
+    systemControl: sysCmu
+
+btcSystem: Miscellaneous.BES1700_RegisterBank @ sysbus 0x6e060000
+
+btcAnalog: Miscellaneous.BES1700_RegisterBank @ sysbus 0x6d010000
+
+btcBleExchange: Memory.MappedMemory @ sysbus 0x6d070000
+    size: 0x4000
+
+gpio0: GPIOPort.BES1700_GPIO @ sysbus 0x40081000
+
+gpio1: GPIOPort.BES1700_GPIO @ sysbus 0x40089000
+    panelSPI: true
+
+gpio2: GPIOPort.BES1700_GPIO @ sysbus 0x4008a000
+
+panelSPI: SPI.BES1700_PanelSPI @ sysbus 0x40009000
+    panel: gpio1
+
+lcdc: Video.BES1700_LCDC @ sysbus 0x401c0000
+    panel: gpio1
+    IRQ -> nvic@27
+
+i2c2: I2C.DesignWare_APB_I2C @ sysbus 0x40075000
+
+panelPower: Miscellaneous.BES1700_I2CRegisters @ i2c2 0x70
+
+gpu: Video.BES1700_GPU @ sysbus 0x401f0000
+
+led: Miscellaneous.BES1700_I2CRegisters @ i2c1 0x30
+    idAddress: 0
+    idValue: 0x40
+
+iomux: Miscellaneous.BES1700_RegisterBank @ sysbus 0x40086000
+
+boostPower: Miscellaneous.BES1700_I2CRegisters @ i2c2 0x75
+
+// BT host core. ARMv8-M (its reset code writes MSPLIM); started by the AP through
+// hal_cmu_bth_start_cpu (AON CMU +0xb8 vector, +0xcc bit 9).
+bth: CPU.CortexM @ sysbus
+    cpuType: "cortex-m33"
+    // 16 architectural regions + one emulator-only region (index 16) that make-resc.py
+    // programs over the PPB; see the note there.
+    numberOfMPURegions: 17
+    nvic: bthNvic
+    init:
+        IsHalted true
+
+bthNvic: IRQControllers.BES1700_PPBExemptNVIC @ sysbus new Bus.BusPointRegistration { address: 0xe000e000; cpu: bth }
+    systickFrequency: 16384
+    IRQ -> bth@0
+
+bthCmu: Miscellaneous.BES1700_BTHClockControl @ sysbus 0x50000000
+    systemControl: sysCmu
