@@ -25,10 +25,11 @@ sram: Memory.MappedMemory @ { sysbus 0x20000000; sysbus 0x21000000 }
 shared: Memory.MappedMemory @ sysbus 0x23c00000
     size: 0x100000
 
-// BTH SRAM. The BTH reset code sets MSP=0x230defe0 and the AP builds the BTH
-// boot vector at 0x230dff00. 0x03000000 is the executable alias used by BTH code.
+// BTH SRAM. Size from the BTH MPU table (regions 0x03000000/0x23000000, 0x260000);
+// MSP=0x230defe0, the AP builds the BTH boot vector at 0x230dff00 and the second
+// AP<->BTH mailbox lives at 0x2319ffe8. 0x03000000 is the executable alias.
 bootSram: Memory.MappedMemory @ { sysbus 0x23000000; sysbus 0x03000000 }
-    size: 0x100000
+    size: 0x260000
 
 // Second NOR flash (hal_norflash_addr_to_id: id 1 = 0x08000000/0x28000000).
 // It holds the installed BTH image (see scripts/make-flash-image.py). BTH code is
@@ -64,6 +65,16 @@ sysCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40000000
     BTCTransmit2 -> btcNvic@34
     APTransmit3 -> nvic@30
     BTCTransmit3 -> btcNvic@35
+    // hal_rmt_ipc_rx_irq_handler walks cfg+0x20 (rx IRQ list): AP 0x60,0x61; BTH 0x49,0x4a.
+    // cfg+0x24 is the tx-done list: AP 0x5e,0x5f; BTH 0x41,0x42.
+    BTHAPReceive0 -> nvic@96
+    BTHAPReceive1 -> nvic@97
+    BTHAPTransmit0 -> nvic@94
+    BTHAPTransmit1 -> nvic@95
+    BTHReceive0 -> bthNvic@73
+    BTHReceive1 -> bthNvic@74
+    BTHTransmit0 -> bthNvic@65
+    BTHTransmit1 -> bthNvic@66
 
 ispi: SPI.BES1700_ISPI @ sysbus 0x4000a000
 
@@ -159,11 +170,38 @@ boostPower: Miscellaneous.BES1700_I2CRegisters @ i2c2 0x75
 // hal_cmu_bth_start_cpu (AON CMU +0xb8 vector, +0xcc bit 9).
 bth: CPU.CortexM @ sysbus
     cpuType: "cortex-m33"
-    numberOfMPURegions: 16
+    // 16 architectural regions + one emulator-only region (index 16) that make-resc.py
+    // programs over the PPB; see the note there.
+    numberOfMPURegions: 17
     nvic: bthNvic
     init:
         IsHalted true
 
-bthNvic: IRQControllers.NVIC @ sysbus new Bus.BusPointRegistration { address: 0xe000e000; cpu: bth }
+bthNvic: IRQControllers.BES1700_PPBExemptNVIC @ sysbus new Bus.BusPointRegistration { address: 0xe000e000; cpu: bth }
     systickFrequency: 16384
     IRQ -> bth@0
+
+bthCmu: Miscellaneous.BES1700_BTHClockControl @ sysbus 0x50000000
+    systemControl: sysCmu
+
+// BTH-side buses. Bases and IRQs from the BTH image's driver tables:
+// I2C {0x50006000 irq 76, 0x50007000 irq 77, 0x50008000 irq 78} at 0x0c0f07d0,
+// DMA {0x50170000 irq 30, 0x50130000 irq 29} at 0x0c0f041c.
+bthI2c0: I2C.DesignWare_APB_I2C @ sysbus 0x50006000
+    IRQ -> bthNvic@76
+
+bthI2c1: I2C.DesignWare_APB_I2C @ sysbus 0x50007000
+    IRQ -> bthNvic@77
+
+bthI2c2: I2C.DesignWare_APB_I2C @ sysbus 0x50008000
+    IRQ -> bthNvic@78
+
+bthDma0: DMA.BES1700_DMA @ sysbus 0x50170000
+    IRQ -> bthNvic@30
+
+bthDma1: DMA.BES1700_DMA @ sysbus 0x50130000
+    IRQ -> bthNvic@29
+
+// Head-tracking IMU probed by the BTH ("lsm6dso32", WHO_AM_I 0x6C). Renode's LSM6DSO
+// model stands in for the LSM6DSO32; the I2C address is an assumption.
+bthImu: Sensors.LSM6DSO_IMU @ bthI2c1 0x6a

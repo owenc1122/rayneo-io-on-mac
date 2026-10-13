@@ -20,5 +20,5 @@ out=$(cd "$out" && pwd)
 python3 scripts/make-flash-image.py "$fwdir" "$out/flash" > "$out/flash-layout.log"
 python3 scripts/make-resc.py "$root" "$out" "$duration" "$extra" > "$out/boot.resc"
 "$renode" --disable-gui --console --plain -e "include @$out/boot.resc" > "$out/boot.log" 2>&1 < /dev/null || true
-grep -E '^\[AP|BTH released|BTC released|Scanout' "$out/boot.log" | tail -40
+grep -E '^\[AP|^\[BTH|BTH released|BTC released|Scanout' "$out/boot.log" | tail -40
 echo "log: $out/boot.log"
