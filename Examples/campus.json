@@ -1,0 +1,24 @@
+{
+  "road": "Museum Ave",
+  "instruction": "Turn right",
+  "distance": 120,
+  "remaining": 850,
+  "eta": "14:35",
+  "heading": 0,
+  "position": [0, 0],
+  "metersPerPixel": 2,
+  "route": [[0, -90], [0, 120], [200, 120]],
+  "roads": [
+    {"class": 2, "points": [[-350, 120], [350, 120]]},
+    {"class": 1, "points": [[0, -160], [0, 280]]},
+    {"class": 1, "points": [[-230, -140], [-230, 240]]},
+    {"class": 1, "points": [[180, -120], [180, 260]]}
+  ],
+  "features": [
+    {"kind": "stop", "position": [-25, 110]},
+    {"kind": "signal", "position": [185, 140]},
+    {"kind": "building", "position": [-260, 170], "name": "Museum"},
+    {"kind": "building", "position": [45, 180], "name": "Library"},
+    {"kind": "building", "position": [-210, -10], "name": "自然历史博物馆"}
+  ]
+}
