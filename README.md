@@ -39,6 +39,10 @@ Developing for smart glasses usually means flashing a real device for every chan
 
 This is an **experiment, not a finished emulator.** It does not reach a usable home screen yet.
 
+<p align="center">
+  <img src="docs/media/boot-progress.svg" alt="Boot progress: the stock firmware loads, enters NuttX, runs board init, mounts storage and shows its boot logo; it stops when the AP opens the BTH subsystem" width="100%">
+</p>
+
 | Area | State | Notes |
 |---|---|---|
 | AP core boots NuttX | Working | Unmodified AP firmware enters the NuttX kernel and completes the board init calls we have observed |
@@ -167,7 +171,7 @@ sh scripts/emulate.sh <OTA 文件目录> 15
 
 ### 架构与路线图
 
-架构图见上方 [Architecture](#architecture)。下一步依次是：BTH 已安装镜像与复位入口、AP 与 BTH 核间通信、资源文件系统并越过开机标志、GPU 绘制、键盘/触控板映射为表冠输入、双屏布局、可移植签名应用。
+启动进度见上方 [Status](#status) 图，架构图见 [Architecture](#architecture)。下一步依次是：BTH 已安装镜像与复位入口、AP 与 BTH 核间通信、资源文件系统并越过开机标志、GPU 绘制、键盘/触控板映射为表冠输入、双屏布局、可移植签名应用。
 
 ### 如何参与
 
