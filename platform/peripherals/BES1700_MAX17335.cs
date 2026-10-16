@@ -28,13 +28,14 @@ namespace Antmicro.Renode.Peripherals.Sensors
             regs[0x61]=0x0000;        // CommStat: DISOff/CHGOff clear, write-protect handled by value only
             regs[0x18]=0x0000;
             regs[0x1b0]=0x0000;       // nConfig
-            pointer=0;Apply();
+            pointer=0;highByte=false;Apply();
         }
 
+        // Byte-oriented: the controller may fetch a 16-bit register one byte per read command.
         internal void WritePage(int page,byte[] data)
         {
             if(data.Length==0) return;
-            pointer=page|data[0];
+            pointer=page|data[0]; highByte=false;
             for(int i=1;i+1<data.Length;i+=2) {
                 regs[pointer]=(ushort)(data[i]|(data[i+1]<<8));
                 pointer=(pointer&0x100)|((pointer+1)&0xff);
@@ -43,11 +44,11 @@ namespace Antmicro.Renode.Peripherals.Sensors
         internal byte[] ReadPage(int count)
         {
             var result=new byte[count];
-            for(int i=0;i<count;i+=2) {
+            for(int i=0;i<count;i++) {
                 regs.TryGetValue(pointer,out var v);
-                result[i]=(byte)v;
-                if(i+1<count) result[i+1]=(byte)(v>>8);
-                pointer=(pointer&0x100)|((pointer+1)&0xff);
+                result[i]=highByte?(byte)(v>>8):(byte)v;
+                if(highByte) pointer=(pointer&0x100)|((pointer+1)&0xff);
+                highByte=!highByte;
             }
             return result;
         }
@@ -65,6 +66,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
         }
         private readonly Dictionary<int,ushort> regs=new Dictionary<int,ushort>();
         private int pointer,soc,mv,temp;
+        private bool highByte;
     }
 
     public sealed class BES1700_MAX17335Page : II2CPeripheral

@@ -67,15 +67,58 @@ import SwiftUI
         restart()
     }
 
-    /// Optional: folder with .ttf files for the glasses' font partition (not part of the OTA set).
+    /// Glasses fonts (not in the OTA set): built once from the user's own RayNeo AI app plus
+    /// upstream open fonts (scripts/prepare-fonts.sh) into Application Support.
+    private var preparedFonts: URL { dataDirectory.appendingPathComponent("fonts", isDirectory: true) }
+    private var fontsReady: Bool {
+        (try? FileManager.default.contentsOfDirectory(atPath: preparedFonts.path).filter { $0.hasSuffix(".ttf") }.count) ?? 0 >= 18
+    }
+
+    /// The RayNeo AI iOS app installed on this Mac (Apple silicon), if any.
+    private func installedRayNeoApp() -> URL? {
+        let files = FileManager.default
+        for folder in ["/Applications", NSHomeDirectory() + "/Applications"] {
+            guard let names = try? files.contentsOfDirectory(atPath: folder) else { continue }
+            for name in names where name.lowercased().contains("rayneo") {
+                let url = URL(fileURLWithPath: folder).appendingPathComponent(name)
+                if files.fileExists(atPath: url.appendingPathComponent("Wrapper").path) || name.hasSuffix(".app") { return url }
+            }
+        }
+        return nil
+    }
+
     func chooseFonts() {
         let panel = NSOpenPanel()
-        panel.title = "选择字体文件夹（可选）"
+        panel.title = "选择雷鸟 AI App"
+        panel.message = "眼镜里的字体来自官方 App。请选择 RayNeo AI 的 .app（或解压后的 IPA 文件夹）"
         panel.canChooseDirectories = true
-        panel.canChooseFiles = false
+        panel.canChooseFiles = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        UserDefaults.standard.set(url.path, forKey: Self.fontsKey)
-        restart()
+        prepareFonts(from: url, thenBoot: true)
+    }
+
+    private func prepareFonts(from source: URL, thenBoot: Bool) {
+        guard let root = assetRoot, let venv = venvDirectory else { status = "需要先准备资源工具（固件菜单）"; return }
+        status = "正在准备眼镜字体…"
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = [root.appendingPathComponent("scripts/prepare-fonts.sh").path, source.path, preparedFonts.path]
+        task.currentDirectoryURL = root
+        var environment = ProcessInfo.processInfo.environment
+        environment["RAYNEO_VENV"] = venv.path
+        task.environment = environment
+        task.terminationHandler = { [weak self] finished in
+            Task { @MainActor in
+                guard let self else { return }
+                if finished.terminationStatus == 0 {
+                    UserDefaults.standard.set(self.preparedFonts.path, forKey: Self.fontsKey)
+                    self.status = "眼镜字体已就绪"
+                    if thenBoot { self.restart() }
+                } else { self.failure = "字体准备失败：请确认选择的是 RayNeo AI App" }
+            }
+        }
+        try? FileManager.default.createDirectory(at: preparedFonts, withIntermediateDirectories: true)
+        try? task.run()
     }
 
     /// Python venv with littlefs-python, used to build the NAND resource partitions.
@@ -115,6 +158,9 @@ import SwiftUI
             return
         }
         guard let root = assetRoot else { failure = "应用资源缺失（platform/scripts）"; return }
+        if !fontsReady, UserDefaults.standard.string(forKey: Self.fontsKey) == nil, let app = installedRayNeoApp(), venvDirectory != nil {
+            prepareFonts(from: app, thenBoot: true); return
+        }
         guard let renode = renodeExecutable() else {
             failure = "未找到 Renode。请把 Renode.app 放到 /Applications 或 \(dataDirectory.path)/renode/"; return
         }
@@ -184,7 +230,7 @@ import SwiftUI
         case .doubleClick: command("gpio0 Pulse 1 false 120"); DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in self?.command("gpio0 Pulse 1 false 120") }
         case .longPress: command("gpio0 Pulse 1 false 1300")
         case .rotate(let steps): command("i2c0.ots Rotate \(steps * 400)")
-        case .press: command("gpio0 SetInput 1 false")
+        case .press: command("gpio0 SetInput 1 false")      // crown key held down (P0_1 active low)
         case .release: command("gpio0 SetInput 1 true")
         }
     }

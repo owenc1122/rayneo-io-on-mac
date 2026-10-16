@@ -15,8 +15,8 @@ struct RayNeoApp: App {
             CommandGroup(replacing: .newItem) {}
             CommandMenu("固件") {
                 Button("选择固件文件夹…") { firmware.chooseFirmware() }.keyboardShortcut("o")
-                Button("选择字体文件夹…") { firmware.chooseFonts() }
-                Button("准备资源分区工具（一次性下载 littlefs-python）") { firmware.installResourceTools() }
+                Button("从雷鸟 AI App 导入眼镜字体…") { firmware.chooseFonts() }
+                Button("准备资源工具（一次性下载）") { firmware.installResourceTools() }
                 Button("重新启动") { firmware.restart() }.keyboardShortcut("r")
             }
             CommandMenu("输入") {
@@ -52,7 +52,7 @@ struct SimulatorView: View {
             HStack {
                 Text(firmware.failure ?? firmware.status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer()
-                Text("空格 单击 · D 双击 · L 长按 · ↑↓/滚轮 旋转").font(.caption).foregroundStyle(.tertiary)
+                Text("空格 按表冠（按住即长按）· D 双击 · ↑↓/滚轮 旋转").font(.caption).foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 10).padding(.vertical, 4)
         }
@@ -79,10 +79,15 @@ struct KeyCatcher: NSViewRepresentable {
         private var scrollAccumulator: CGFloat = 0
         override var acceptsFirstResponder: Bool { true }
         override func viewDidMoveToWindow() { window?.makeFirstResponder(self) }
+        // Space follows the real key: held as long as it is held (click, double click, long press).
+        override func keyUp(with event: NSEvent) {
+            if event.keyCode == 49, let firmware { MainActor.assumeIsolated { firmware.send(.release) } }
+            else { super.keyUp(with: event) }
+        }
         override func keyDown(with event: NSEvent) {
             guard !event.isARepeat, let firmware else { return }
             switch event.keyCode {
-            case 49: MainActor.assumeIsolated { firmware.send(.click) }            // space
+            case 49: MainActor.assumeIsolated { firmware.send(.press) }            // space
             case 2: MainActor.assumeIsolated { firmware.send(.doubleClick) }       // D
             case 37: MainActor.assumeIsolated { firmware.send(.longPress) }        // L
             case 126: MainActor.assumeIsolated { firmware.send(.rotate(1)) }       // up

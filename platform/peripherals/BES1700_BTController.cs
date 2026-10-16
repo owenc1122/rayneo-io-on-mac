@@ -18,6 +18,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 for(long o=0;o<=0x30;o+=4)base.WriteDoubleWord(o,0);
                 value&=0x7fffffffu;
             }
+            // Second core control block at +0x400 (written by BTC init right after the version
+            // check): bit 31 is a self-clearing soft reset the firmware polls for.
+            if(offset==0x400 && (value&0x80000000u)!=0) {
+                for(long o=0x404;o<=0x430;o+=4) if(o!=0x404) base.WriteDoubleWord(o,0);
+                value&=0x7fffffffu;
+            }
             if(offset==0x100 && (value&0x80000000u)!=0) {
                 // Firmware reads a 28-bit half-slot clock and a 625-step fine counter.
                 // One half-slot is 312.5 us; capture both from the same virtual instant.

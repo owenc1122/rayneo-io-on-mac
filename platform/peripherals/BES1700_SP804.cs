@@ -48,7 +48,7 @@ namespace Antmicro.Renode.Peripherals.Timers
             {
                 switch(offset) {
                     case 0x00: return load;
-                    case 0x04: return running ? (uint)timer.Value : value;
+                    case 0x04: return running ? (uint)Math.Max(2UL, timer.Value) - 2 : value;
                     case 0x08: return control;
                     case 0x10: return ris ? 1u : 0u;
                     case 0x14: return ris && (control & 0x20) != 0 ? 1u : 0u;
@@ -87,9 +87,13 @@ namespace Antmicro.Renode.Peripherals.Timers
                 value = (uint)start;
                 if((control & 0x80) == 0) { running = false; return; }
                 running = true;
+                // SP804 counts Load..0 and interrupts on the following tick: a period is Load+1 ticks
+                // (the HAL programs Load = ticks-1 and checks the AON timer for early expiry).
+                // The real counter decrements on the shared clock edges, so the first decrement waits for
+                // the next edge; this model starts mid-tick, so one extra tick keeps it from firing early.
                 timer.Enabled = false;
-                timer.Limit = Math.Max(1UL, start);
-                timer.Value = Math.Max(1UL, start);
+                timer.Limit = start + 2;
+                timer.Value = start + 2;
                 timer.Enabled = true;
             }
             private void OnLimit()

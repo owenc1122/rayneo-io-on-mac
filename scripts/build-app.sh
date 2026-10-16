@@ -13,7 +13,8 @@ cp "$bin_dir/RayNeoSimulator" "$app/Contents/MacOS/RayNeoSimulator"
 # Emulator description and helper scripts (no firmware-derived data).
 mkdir -p "$app/Contents/Resources/platform" "$app/Contents/Resources/scripts"
 cp -R platform/. "$app/Contents/Resources/platform/"
-cp scripts/emulate.sh scripts/make-resc.py scripts/make-flash-image.py scripts/make-nand-image.py scripts/setup-tools.sh "$app/Contents/Resources/scripts/"
+cp scripts/emulate.sh scripts/make-resc.py scripts/make-flash-image.py scripts/make-nand-image.py scripts/make-user-data.py \
+   scripts/prepare-fonts.sh scripts/setup-tools.sh "$app/Contents/Resources/scripts/"
 if [ "${BUNDLE_RENODE:-0}" = 1 ] && [ -d .local/renode/Renode.app ]; then
     mkdir -p "$app/Contents/Resources/renode"
     cp -R .local/renode/Renode.app "$app/Contents/Resources/renode/"

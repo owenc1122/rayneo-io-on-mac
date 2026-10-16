@@ -147,10 +147,10 @@ dwt: Miscellaneous.DWT @ sysbus 0xe0001000
     frequency: 240000000
 
 // AP I2C controllers; IRQs from the stock HAL table at 0x2010132c (base, ..., irq).
-i2c0: I2C.DesignWare_APB_I2C @ sysbus 0x40006000
+i2c0: I2C.BES1700_I2C @ sysbus 0x40006000
     IRQ -> nvic@50
 
-i2c1: I2C.DesignWare_APB_I2C @ sysbus 0x40007000
+i2c1: I2C.BES1700_I2C @ sysbus 0x40007000
     IRQ -> nvic@51
 
 // Temple batteries (MAX17335 fuel gauge/protector), see BES1700_MAX17335.cs.
@@ -232,13 +232,13 @@ lcdc: Video.BES1700_LCDC @ sysbus 0x401c0000
     panel: gpio1
     IRQ -> nvic@27
 
-i2c2: I2C.DesignWare_APB_I2C @ sysbus 0x40075000
+i2c2: I2C.BES1700_I2C @ sysbus 0x40075000
     IRQ -> nvic@52
 
-i2c3: I2C.DesignWare_APB_I2C @ sysbus 0x40076000
+i2c3: I2C.BES1700_I2C @ sysbus 0x40076000
     IRQ -> nvic@53
 
-i2c4: I2C.DesignWare_APB_I2C @ sysbus 0x40077000
+i2c4: I2C.BES1700_I2C @ sysbus 0x40077000
     IRQ -> nvic@54
 
 panelPower: Miscellaneous.BES1700_I2CRegisters @ i2c2 0x70
