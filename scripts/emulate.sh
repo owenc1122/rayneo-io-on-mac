@@ -18,6 +18,8 @@ renode=${RENODE:-$root/.local/renode/Renode.app/Contents/MacOS/renode}
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 python3 scripts/make-flash-image.py "$fwdir" "$out/flash" > "$out/flash-layout.log"
+# Bonded phone record (BOND=0 keeps the factory-fresh BondView start).
+[ "${BOND:-iPhone}" = 0 ] || python3 scripts/make-user-data.py "$out/flash/flash0.bin" --name "${BOND:-iPhone}" >> "$out/flash-layout.log"
 # NAND resource partitions (littlefs). Optional fonts: FONTS=<dir with .ttf> (factory fonts are not in the OTA set).
 venv=${RAYNEO_VENV:-$root/.local/venv}
 if [ -x "$venv/bin/python" ]; then
