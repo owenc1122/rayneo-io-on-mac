@@ -102,7 +102,12 @@ lines += [
 if extra:
     lines.append(f'include @{extra}')
 if seconds != '0':
-    lines += [f'emulation RunFor "{seconds}"',
+    lines.append(f'emulation RunFor "{seconds}"')
+    # SCENARIO=<file>: monitor commands run after the boot period (input tests, frame captures).
+    scenario = __import__('os').environ.get('SCENARIO')
+    if scenario:
+        lines += [l.replace('@OUT/', f'@{out}/') for l in Path(scenario).read_text().splitlines() if l.strip() and not l.startswith('#')]
+    lines += [
               'console_log `cpu PC`', 'console_log `cpu LR`', 'console_log `bth PC`', 'console_log `c1 PC`', 'console_log `btc PC`', 'quit']
 else:
     lines.append('start')

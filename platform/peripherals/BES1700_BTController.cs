@@ -6,7 +6,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 {
     public sealed class BES1700_BTController : BES1700_RegisterBank
     {
-        public BES1700_BTController(IMachine machine):base(machine) {
+        public BES1700_BTController(IMachine machine, uint versionWord = 0):base(machine) {
+            this.versionWord=versionWord;
             clock=new LimitTimer(machine.ClockSource,2000000UL,this,"btFineClock",uint.MaxValue,
                 direction:Direction.Ascending,enabled:true,eventEnabled:false,autoUpdate:true);
         }
@@ -27,6 +28,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             }
             base.WriteDoubleWord(offset,value);
         }
+        // Baseband IP version at +0x404 (BTC init asserts it equals 0x0B000600 on the radio block).
+        public override uint ReadDoubleWord(long offset) {
+            if(offset==0x404 && versionWord!=0) return versionWord;
+            return base.ReadDoubleWord(offset);
+        }
         private readonly LimitTimer clock;
+        private readonly uint versionWord;
     }
 }

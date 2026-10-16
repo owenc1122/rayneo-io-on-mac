@@ -84,13 +84,7 @@ namespace Antmicro.Renode.Peripherals.Video
                     }
                 }
             } else this.Log(LogLevel.Warning,"Non-RayNeo layer geometry {0}x{1} stride {2}; canvas not updated",width,height,stride);
-            if(FrameImagePath!=null) {
-                var header=System.Text.Encoding.ASCII.GetBytes(string.Format("P5\n{0} {1}\n255\n",2*EyeWidth,EyeHeight));
-                string temporary=FrameImagePath+".tmp";
-                using(var stream=System.IO.File.Create(temporary)) {stream.Write(header,0,header.Length);stream.Write(canvas,0,canvas.Length);}
-                if(System.IO.File.Exists(FrameImagePath)) System.IO.File.Replace(temporary,FrameImagePath,null);
-                else System.IO.File.Move(temporary,FrameImagePath);
-            }
+            if(FrameImagePath!=null) QueueFrameWrite();
             if(capturePath!=null) System.IO.File.WriteAllBytes(capturePath,LastFrame);
             if(CompletedFrames<=4) this.Log(LogLevel.Info,"Scanout copied: frame={0} address={1:X} size={2}x{3} stride={4} cs={5:X}",CompletedFrames,address,width,height,stride,cs);
             base.WriteDoubleWord(0x224,0);
@@ -107,6 +101,33 @@ namespace Antmicro.Renode.Peripherals.Video
             return (int)System.Math.Floor((delta+RowBytes/2.0)/RowBytes);
         }
         private void UpdateIRQ() {IRQ.Set((ReadDoubleWord(0x1c4)&ReadDoubleWord(0x1c0))!=0);}
+        // The Mac app polls FrameImagePath; write it at most ~30 times per host second. A pending
+        // update is flushed by a host timer so the last frame of an animation is never lost.
+        private void QueueFrameWrite()
+        {
+            lock(frameLock) {
+                var now=System.Diagnostics.Stopwatch.GetTimestamp();
+                if(now-lastWrite>=System.Diagnostics.Stopwatch.Frequency/30) {WriteFrame(FrameImagePath);lastWrite=now;framePending=false;return;}
+                if(framePending) return;
+                framePending=true;
+                if(flushTimer==null) flushTimer=new System.Threading.Timer(_=>{lock(frameLock){if(framePending){WriteFrame(FrameImagePath);lastWrite=System.Diagnostics.Stopwatch.GetTimestamp();framePending=false;}}},null,40,System.Threading.Timeout.Infinite);
+                else flushTimer.Change(40,System.Threading.Timeout.Infinite);
+            }
+        }
+        private void WriteFrame(string path)
+        {
+            var header=System.Text.Encoding.ASCII.GetBytes(string.Format("P5\n{0} {1}\n255\n",2*EyeWidth,EyeHeight));
+            string temporary=path+".tmp";
+            using(var stream=System.IO.File.Create(temporary)) {stream.Write(header,0,header.Length);stream.Write(canvas,0,canvas.Length);}
+            if(System.IO.File.Exists(path)) System.IO.File.Replace(temporary,path,null);
+            else System.IO.File.Move(temporary,path);
+        }
+        // Monitor helper for tests: `lcdc SaveFrame @/path/shot.pgm` writes the current two-eye canvas.
+        public void SaveFrame(string path) { lock(frameLock) WriteFrame(path); }
+        private readonly object frameLock=new object();
+        private System.Threading.Timer flushTimer;
+        private long lastWrite;
+        private bool framePending;
         private readonly uint[] bases=new uint[2];
         private readonly byte[] canvas=new byte[2*EyeWidth*EyeHeight];
         private readonly IMachine machine;
