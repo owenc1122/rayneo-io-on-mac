@@ -295,6 +295,9 @@ bthDma1: DMA.BES1700_DMA @ sysbus 0x50130000
 // model stands in for the LSM6DSO32; the I2C address is an assumption.
 bthImu: Sensors.LSM6DSO_IMU @ bthI2c1 0x6a
 
+// Magnetometer (mmc5603nj_init on the BTH, product ID 0x10). Bus 2 / 0x30 is an assumption.
+bthMag: Sensors.BES1700_MMC5603NJ @ bthI2c2 0x30
+
 // Second M55 core of the AP subsystem ("M55C1", nuttx_apc1.bin: CHIP_ROLE=CP), runs the
 // bluetoothd RPC server. Started by cp_subsys_open via AON +0xb4/+0x1a4.
 c1: CPU.CortexM @ sysbus

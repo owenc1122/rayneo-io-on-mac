@@ -20,8 +20,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             }
             // Second core control block at +0x400 (written by BTC init right after the version
             // check): bit 31 is a self-clearing soft reset the firmware polls for.
-            if(offset==0x400 && (value&0x80000000u)!=0) {
-                for(long o=0x404;o<=0x430;o+=4) if(o!=0x404) base.WriteDoubleWord(o,0);
+            // Same for the third block at +0x800 (version 0x0B001200).
+            if((offset==0x400 || offset==0x800) && (value&0x80000000u)!=0) {
+                for(long o=offset+8;o<=offset+0x30;o+=4) base.WriteDoubleWord(o,0);
                 value&=0x7fffffffu;
             }
             if(offset==0x100 && (value&0x80000000u)!=0) {
@@ -34,9 +35,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             }
             base.WriteDoubleWord(offset,value);
         }
-        // Baseband IP version at +0x404 (BTC init asserts it equals 0x0B000600 on the radio block).
+        // Core IP versions the BTC init asserts on the radio block: +0x404 = 0x0B000600, +0x804 = 0x0B001200.
         public override uint ReadDoubleWord(long offset) {
             if(offset==0x404 && versionWord!=0) return versionWord;
+            if(offset==0x804 && versionWord!=0) return 0x0b001200;      // second core block version
             return base.ReadDoubleWord(offset);
         }
         private readonly LimitTimer clock;
