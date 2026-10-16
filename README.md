@@ -51,24 +51,25 @@ sh scripts/run-app.sh                   # 等同于 Finder 双击
 - BTH 侧 CMU、I2C、DMA、IMU（Renode 自带 LSM6DSO 模型替代 LSM6DSO32）。
 - GPU（VGLite 命令缓冲执行）、LCDC 双眼 G4 扫描输出、GPIO/PSC 中断、OTS 光学旋钮：取自 `.local/research/parallel/` 的并行研究草稿并接入正式配置。
 
-## 已验证（2026-10-13，原版 1.0.4.12 固件）
+## 已验证（2026-10-16，原版 1.0.4.12 固件，均有日志/截图）
 
-- AP 原固件完成 NuttX 启动、驱动初始化，显示开机标志。
-- 安装后的 BTH 镜像通过 AP 的启动结构检查（日志：`subsys_check_boot_struct: boot_addr=0x28000000 magic=0xBE57EC1C`），BTH 核被释放并启动自己的 NuttX，完成 I2C、IMU、rpmsg 初始化，与 AP 双向 rpmsg 通信（AP 下发 IMU 参数，BTH 回 ACK：`[BTH] IMU params ACK sent successfully`）。
-- AP 越过 BTH 打开阶段，继续启动服务、LVGL 和 Launcher，日志出现 `Launcher: First frame ready`、`BondView: Show`（未配对设备的绑定页）。
-- NAND 资源分区：固件从模拟 NAND 挂载 littlefs，读到 `images.bin`、`lotties.bin` 和字体（`Rayneo create font CN_20 success`）。
-- GPU 收到 LVGL 的真实命令缓冲并由模型执行。
-- 证据日志：`.local/runs/t13/boot.log`（BTH 启动）、`.local/runs/t15/boot.log`（资源与字体）。
+- 四个核（AP、M55C1、BTH、BTC）全部启动；约 12 秒模拟时间进入原厂桌面（`BoardView::show`），整次运行无断言。
+- **已配对开机**：`scripts/make-user-data.py` 在 NOR 用户数据区（0x30FF0000/0x30FEE000，偏移 0x1CEC）写入与真机配对后相同格式的绑定记录，原厂 Launcher 直接进主页；`BOND=0` 保留出厂的配对引导页。
+- **中文/多语言字体**：18 个 nand_font 全部加载成功。其中 4 个原厂文件取自用户自己的雷鸟 AI App，其余为同一开源字族（Noto、Vazirmatn、思源黑体 KR），`pixel_monospaced_latin_sub` 用 VT323 替身。见 `scripts/prepare-fonts.sh`。
+- **时间**：PMU 日历寄存器（0x17D–0x180，BCD）跟随 Mac 本地时间，主页时间日期正确。
+- **电量**：左右镜腿两颗 MAX17335（I2C0 0x36/0x0B、0x76/0x4B）被识别，主页显示电量；USB 检测脚（GPIO2 bit20）默认未插线。
+- **表冠**：单击进应用列表、再单击打开应用、长按/双击唤醒 RayNeo AI、旋转在应用列表里切换（录音→实时字幕→实时提示），全部由原固件处理（`tests/scenarios/crown.txt`、`rotate.txt`）。
+- **硬件定时器**：SP804 双定时器（0x40083000/0x40002000）补上后，按键去抖等软件定时器正常；I2C 改用自建 DesignWare 模型，不再出现读超时。
+- **蓝牙控制器**：BTC 原固件通过基带版本/软复位检查，响应主机 HCI 命令（Reset、读版本/地址、设置名称、事件掩码等），BLE 广播能开启。
+- **Mac 应用**：窗口显示原固件画面，空格按住=按表冠、滚轮/方向键=旋转；退出时保存 NOR+NAND，下次启动恢复（设置、配对、文件保留）；「恢复出厂设置」清除。固件选择后复制到应用数据目录，避免访问「文稿」触发系统授权弹窗。
 
-## 未完成 / 阻塞
+## 未完成 / 与真机仍有差异
 
-- **bluetoothd 断言**：AP 的 bluetoothd 通过 rpmsg 调用 M55C1（`nuttx_apc1.bin`，`RPC_SERVER`）。M55C1 已作为第四个核接入并能被 AP 启动、完成 IPC 打开，但 AP↔M55C1 握手尚未稳定，约 38 秒处 `rpc_plat_cond_wait` 超时断言后系统复位。这是目前进入桌面的主要阻塞。
-- 因上面的复位，Mac 窗口里尚未看到完整的 Launcher 画面（截至最后一次运行，扫描输出的帧为空白/开机标志）。
-- 18 个出厂字体不在升级包里；可用 `FONTS=` 指定同名或同族字体（脚本对 `sh_sans_cn_reg_sub.ttf`、`roboto_condensed_reg_en_sub.ttf` 支持明确标注的替身），这些不是原厂文件。
-- HiFi4 音频 DSP、Wi‑Fi、BTC 射频、电池计、光感等没有完整模型；相关驱动报错但不阻塞启动。
-- 模拟速度约为实时的 1/4～1/5，进入 Launcher 需要数分钟真实时间。
-- 输入链路（GPIO 按键、OTS 旋钮注入、Mac 键盘映射）已接好，但尚未在 Launcher 界面上完成端到端验证。
-- 可移植 `.app`：已改为从包内 Resources 读取模型和脚本、通过对话框选择固件、日志写到 Application Support，不再依赖源码目录；需要系统 `python3`，资源分区还需一次性安装 littlefs-python。
+- **手机连接**：BTC 基带没有射频和基带定时中断模型，无法与任何手机真正连接；依赖手机 App 的功能（录音、字幕、提示、导航、AI 对话等）会停在「请将眼镜连接至手机 App」。
+- **音频**：HiFi4 音频 DSP、麦克风、扬声器未建模，没有声音输入输出。
+- **其他传感器**：IMU 只有静态数据（头部手势不可用），磁力计总线地址为推测，光感 W1160、佩戴检测、Wi‑Fi 未建模。
+- **速度**：约为实时的 1/8，开机到桌面约 2 分钟。主要开销在核间同步与 M55C1 的轮询，尚未优化。
+- `pixel_monospaced_latin_sub` 字体不是原厂文件（未识别出原字体）。
 
 ## 研究工具
 
