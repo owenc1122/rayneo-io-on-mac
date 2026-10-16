@@ -77,8 +77,8 @@
 <text class="s" x="930" y="286">emulated LCDC scanned out,</text>
 <text class="s" x="930" y="306">shows it in a native window</text>
 <text class="m" x="930" y="338">.local/runs/ui-*/frame.pgm</text>
-<path class="l" d="M673 371 C780 371 800 300 906 300" marker-end="url(#ar)"/>
-<text class="s" x="752" y="352" style="font-size:12px">frame buffer</text>
+<path class="l" d="M596 412 V419 H866 C892 419 884 300 906 300" marker-end="url(#ar)"/>
+<text class="s" x="884" y="268" text-anchor="middle" style="font-size:12px">frame</text><text class="s" x="884" y="283" text-anchor="middle" style="font-size:12px">buffer</text>
 <path class="l" d="M906 220 C870 220 880 140 862 140" marker-end="url(#ar)"/>
 <text class="s" x="866" y="128" style="font-size:12px">start run</text>
 <!-- legend -->
