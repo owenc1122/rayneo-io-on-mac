@@ -18,6 +18,7 @@ struct RayNeoApp: App {
                 Button("从雷鸟 AI App 导入眼镜字体…") { firmware.chooseFonts() }
                 Button("准备资源工具（一次性下载）") { firmware.installResourceTools() }
                 Button("重新启动") { firmware.restart() }.keyboardShortcut("r")
+                Button("恢复出厂设置") { firmware.factoryReset() }
             }
             CommandMenu("输入") {
                 Button("表冠单击（空格）") { firmware.send(.click) }

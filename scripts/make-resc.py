@@ -60,7 +60,8 @@ lines += [
     f'sysbus LoadBinary @{out}/flash/flash0.bin 0x10000000',
     f'sysbus LoadBinary @{out}/flash/flash1.bin 0x28000000',
     f'lcdc FrameImagePath "{out}/frame.pgm"',
-] + ([f'nand LoadImage @{out}/nand/nand-data.bin'] if (out / 'nand/nand-data.bin').exists() else []) + ([] if not __import__('os').environ.get('APIRQDBG') else [
+] + ([f'nand LoadImage @{out}/nand/nand-data.bin'] if (out / 'nand/nand-data.bin').exists() else []) + (
+    [f'nand LoadState @{state}/nand-state.bin'] if (state := __import__('os').environ.get('STATE')) and Path(state, 'nand-state.bin').exists() else []) + ([] if not __import__('os').environ.get('APIRQDBG') else [
     'cpu AddHook 0x1008bc """\nn=self.GetRegister(0).RawValue\nif n>=100 and n<=115: print(\'[APIRQ] %d sp=0x%x\' % (n, self.GetRegister(13).RawValue))\n"""',
     'cpu AddHook 0x105dbb14 """\nbus=machine.SystemBus\nc=self.GetRegister(1).RawValue\nprint(\'[APFAULT] ctx=0x%x \' % c + \' \'.join([\'%08x\' % bus.ReadDoubleWord(c+4*i) for i in range(24)]))\n"""',
     'cpu AddHook 0x1008f0 """\nr=self.GetRegister(5).RawValue\nif (r & 1)==0: print(\'[APIRQ] even handler 0x%x irq %d\' % (r, self.GetRegister(4).RawValue))\n"""',

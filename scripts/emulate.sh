@@ -18,8 +18,15 @@ renode=${RENODE:-$root/.local/renode/Renode.app/Contents/MacOS/renode}
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 python3 scripts/make-flash-image.py "$fwdir" "$out/flash" > "$out/flash-layout.log"
-# Bonded phone record (BOND=0 keeps the factory-fresh BondView start).
-[ "${BOND:-iPhone}" = 0 ] || python3 scripts/make-user-data.py "$out/flash/flash0.bin" --name "${BOND:-iPhone}" >> "$out/flash-layout.log"
+# STATE=<dir>: persistent glasses (NOR flash0 + NAND pages saved by the app on quit, see
+# FirmwareModel.saveState). A saved flash0 replaces the freshly installed one.
+if [ -n "${STATE:-}" ] && [ -f "$STATE/flash0.bin" ]; then
+    cp "$STATE/flash0.bin" "$out/flash/flash0.bin"
+    echo "restored flash0 from $STATE" >> "$out/flash-layout.log"
+else
+    # Bonded phone record (BOND=0 keeps the factory-fresh BondView start).
+    [ "${BOND:-iPhone}" = 0 ] || python3 scripts/make-user-data.py "$out/flash/flash0.bin" --name "${BOND:-iPhone}" >> "$out/flash-layout.log"
+fi
 # NAND resource partitions (littlefs). Optional fonts: FONTS=<dir with .ttf> (factory fonts are not in the OTA set).
 venv=${RAYNEO_VENV:-$root/.local/venv}
 if [ -x "$venv/bin/python" ]; then

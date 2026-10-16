@@ -33,6 +33,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 base.WriteDoubleWord(0x104,(uint)(624-ticks%625));
                 base.WriteDoubleWord(0x9c4,(uint)(ticks/2));
             }
+            // +0x100 bit 30: clock adjust request; the controller polls until the hardware clears it.
+            if(offset==0x100 && (value&0x40000000u)!=0) value&=~0x40000000u;
             base.WriteDoubleWord(offset,value);
         }
         // Core IP versions the BTC init asserts on the radio block: +0x404 = 0x0B000600, +0x804 = 0x0B001200.

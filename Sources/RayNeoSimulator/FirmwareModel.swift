@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Darwin
 import Network
 import SwiftUI
@@ -145,6 +146,38 @@ import SwiftUI
         try? task.run()
     }
 
+    /// Saved glasses (flash + NAND as the firmware left them), one per firmware build, so settings,
+    /// pairing and files survive like on real glasses. Deleted by "恢复出厂设置".
+    private var stateDirectory: URL? {
+        guard let firmware = firmwareDirectory,
+              let image = try? Data(contentsOf: firmware.appendingPathComponent("nuttx_ap.bin"), options: .mappedIfSafe) else { return nil }
+        let digest = SHA256.hash(data: image).prefix(8).map { String(format: "%02x", $0) }.joined()
+        return dataDirectory.appendingPathComponent("state/\(digest)", isDirectory: true)
+    }
+
+    /// Asks the running emulator to write its flash and NAND, then waits (bounded) for the files.
+    private func saveState() {
+        guard running, let state = stateDirectory else { return }
+        try? FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
+        let flash = state.appendingPathComponent("flash0.bin"), nand = state.appendingPathComponent("nand-state.bin")
+        let before = [flash, nand].map { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast }
+        command("pause")
+        command("nor SaveImage @\(flash.path)")
+        command("nand SaveState @\(nand.path)")
+        let deadline = Date().addingTimeInterval(6)
+        while Date() < deadline {
+            let after = [flash, nand].map { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast }
+            if after[0] > before[0] && after[1] > before[1] { break }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+    }
+
+    func factoryReset() {
+        stop()
+        if let state = stateDirectory { try? FileManager.default.removeItem(at: state) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.boot() }
+    }
+
     func restart() {
         stop()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.boot() }
@@ -181,6 +214,7 @@ import SwiftUI
             environment["RENODE_MONITOR_PORT"] = String(monitorPort)
             if let fonts = UserDefaults.standard.string(forKey: Self.fontsKey) { environment["FONTS"] = fonts }
             if let venv = venvDirectory { environment["RAYNEO_VENV"] = venv.path }
+            if let state = stateDirectory { environment["STATE"] = state.path }
             task.environment = environment
             task.standardInput = FileHandle.nullDevice
             task.standardOutput = handle; task.standardError = handle
@@ -211,6 +245,7 @@ import SwiftUI
     }
 
     func stop() {
+        saveState()
         timer?.invalidate(); timer = nil
         monitor?.cancel(); monitor = nil
         guard let process, process.isRunning else { return }

@@ -87,6 +87,12 @@ namespace Antmicro.Renode.Peripherals.SPI
             pendingAddress++;pendingBytes--;
             if(pendingBytes==0)status1&=0xfc;
         }
+        // Persistent state between simulator sessions: the whole flash array as the firmware left it.
+        public void SaveImage(string path) {
+            string temporary=path+".tmp";
+            System.IO.File.WriteAllBytes(temporary,machine.GetSystemBus(this).ReadBytes(flashBase,(int)flashSize));
+            if(System.IO.File.Exists(path)) System.IO.File.Replace(temporary,path,null); else System.IO.File.Move(temporary,path);
+        }
         private uint pendingAddress;
         private int pendingBytes;
         public void Reset(){regs.Clear();tx.Clear();rx.Clear();seen.Clear();status1=status2=0;statusWriteEnabled=false;pendingBytes=0;}
