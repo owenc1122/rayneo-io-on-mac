@@ -30,11 +30,21 @@ if %s:
     for _l in fw_format(bus, self.GetRegister(1).RawValue, %s).split('\\n'):
         if _l.strip(): print('[BTH] ' + _l.rstrip())
 ''' % (cond, ap)
-c1_hook = printf + '''
+def c1_hook(mode):
+    # 'i': hal_trace_printf_internal (only lines that do not continue into nx_vsyslog);
+    # 'v': nx_vsyslog(prio, fmt, va_list *ap). M55C1 addresses are read in its own view.
+    if mode == 'i':
+        cond = 'bus.ReadByte(0x20002c70, self) <= 3 or ((bus.ReadByte(0x1b753fdc) >> (((int(self.GetRegister(0).RawValue) >> 4) & 7) + 1)) & 1) == 0'
+        ap = 'self.GetRegister(2).RawValue'
+    else:
+        cond = 'True'
+        ap = 'bus.ReadDoubleWord(self.GetRegister(2).RawValue, self)'
+    return printf + '''
 bus = machine.SystemBus
-for _l in fw_format(bus, self.GetRegister(1).RawValue, self.GetRegister(2).RawValue, self).split('\\n'):
-    if _l.strip(): print('[C1] ' + _l.rstrip() + ('  (lr=0x%x caller=0x%x)' % (self.GetRegister(14).RawValue, bus.ReadDoubleWord(self.GetRegister(13).RawValue + 8, self)) if 'rror' in _l else ''))
-'''
+if %s:
+    for _l in fw_format(bus, self.GetRegister(1).RawValue, %s, self).split('\\n'):
+        if _l.strip(): print('[C1] ' + _l.rstrip())
+''' % (cond, ap)
 out_hook = '''
 buf = self.GetRegister(0).RawValue
 n = int(self.GetRegister(1).RawValue)
@@ -52,6 +62,7 @@ lines += [
     f'lcdc FrameImagePath "{out}/frame.pgm"',
 ] + ([f'nand LoadImage @{out}/nand/nand-data.bin'] if (out / 'nand/nand-data.bin').exists() else []) + ([] if not __import__('os').environ.get('APIRQDBG') else [
     'cpu AddHook 0x1008bc """\nn=self.GetRegister(0).RawValue\nif n>=100 and n<=115: print(\'[APIRQ] %d sp=0x%x\' % (n, self.GetRegister(13).RawValue))\n"""',
+    'cpu AddHook 0x105dbb14 """\nbus=machine.SystemBus\nc=self.GetRegister(1).RawValue\nprint(\'[APFAULT] ctx=0x%x \' % c + \' \'.join([\'%08x\' % bus.ReadDoubleWord(c+4*i) for i in range(24)]))\n"""',
     'cpu AddHook 0x1008f0 """\nr=self.GetRegister(5).RawValue\nif (r & 1)==0: print(\'[APIRQ] even handler 0x%x irq %d\' % (r, self.GetRegister(4).RawValue))\n"""',
 ]) + [
     'logLevel 3 nvic',
@@ -80,7 +91,9 @@ lines += [
     'bth AddHook 0x0c04a3c8 """' + bth_hook('s') + '"""',
     'bth AddHook 0x0c040678 """' + bth_hook('v') + '"""',
     # M55C1 hal_trace_printf_internal: flash 0x10c135c0, copied to its ITCM at 0x00102adc.
-    'c1 AddHook 0x00102adc """' + c1_hook + '"""',
+    'c1 AddHook 0x00102adc """' + c1_hook('i') + '"""',
+    # M55C1 nx_vsyslog at 0x10d0a008 (veneer target from its trace path).
+    'c1 AddHook 0x10d0a008 """' + c1_hook('v') + '"""',
 ] + ([] if not __import__('os').environ.get('C1DBG') else [
     'c1 AddHook 0x10cfed54 """\nbus=machine.SystemBus\nr0=self.GetRegister(0).RawValue\nprint(\'[C1DBG] rx_by_chan r0=0x%x cfg=0x%x lr=0x%x\' % (r0, bus.ReadDoubleWord(r0), self.GetRegister(14).RawValue))\n"""',
     'c1 AddHook 0x10cff780 """\nbus=machine.SystemBus\nr0=self.GetRegister(0).RawValue\nprint(\'[C1DBG] rx_irq cfg=0x%x name=0x%x inst=0x%x lr=0x%x\' % (r0, bus.ReadDoubleWord(r0), bus.ReadDoubleWord(r0+0x10), self.GetRegister(14).RawValue))\n"""',

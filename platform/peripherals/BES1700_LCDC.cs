@@ -31,6 +31,14 @@ namespace Antmicro.Renode.Peripherals.Video
             if(offset==0x224 && (value&1)!=0) {ScanOut();return;}
             if(offset!=0x280 || (value&1)==0) return;
             int length=(value&2)!=0 ? (int)(((value>>4)&255)+1)/8 : 0;
+            if(qspiLog-->0) this.Log(LogLevel.Info,"QSPI cmd={0:X2} len={1} data={2:X8} {3:X8}",ReadDoubleWord(0x284),length,ReadDoubleWord(0x288),ReadDoubleWord(0x28c));
+            // Panel row window: cmd 0x02, bytes 00 2A 00 <start hi> <start lo> <end hi> <end lo>
+            // (rayneo_lcdc_send_cmd_list before each partial/full transfer).
+            if(ReadDoubleWord(0x284)==0x02 && length>=7) {
+                var b=new byte[7];
+                for(int i=0;i<7;i++) b[i]=(byte)(ReadDoubleWord(0x288+(i/4)*4)>>(24-8*(i%4)));
+                if(b[1]==0x2a) { windowStart=(b[3]<<8)|b[4]; windowEnd=(b[5]<<8)|b[6]; }
+            }
             var previous=panel.ReadDoubleWord(0);
             uint selections=(1u<<16)|(1u<<23);
             uint selected=(~previous)&selections;
@@ -45,6 +53,12 @@ namespace Antmicro.Renode.Peripherals.Video
             base.WriteDoubleWord(0x280,value&~1u);
             base.WriteDoubleWord(0x1c4,ReadDoubleWord(0x1c4)|(1u<<18));
         }
+        // Debug helper: dump emulated memory (e.g. the LVGL frame buffer) to a host file.
+        public void DumpRegion(ulong address, int length, string path) {
+            System.IO.File.WriteAllBytes(path, machine.GetSystemBus(this).ReadBytes(address, length));
+        }
+        private int qspiLog=0;
+        private int windowStart=-1, windowEnd=-1;
         private void ScanOut()
         {
             uint control=ReadDoubleWord(0x190), address=ReadDoubleWord(0xc0);
@@ -59,7 +73,7 @@ namespace Antmicro.Renode.Peripherals.Video
             bool eyeA=(cs&(1u<<16))!=0, eyeB=(cs&(1u<<23))!=0;
             if(!eyeA && !eyeB) eyeA=eyeB=true;                 // LCDC mux without GPIO CS (boot logo path)
             if(stride==RowBytes && width*3<=EyeWidth/2) {
-                int firstRow=RowOf(address,height,eyeA?0:1);
+                int firstRow=windowStart>=0 && windowStart<EyeHeight ? windowStart : RowOf(address,height,eyeA?0:1);
                 for(int r=0;r<height && firstRow+r<EyeHeight;r++) {
                     int y=firstRow+r; if(y<0) continue;
                     for(int b=0;b<width*3;b++) {

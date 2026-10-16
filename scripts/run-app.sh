@@ -1,4 +1,5 @@
 #!/bin/sh
+# Opens the built app the same way Finder does.
 set -eu
 cd "$(dirname "$0")/.."
-exec './build/RayNeo io on Mac.app/Contents/MacOS/RayNeoSimulator'
+open 'build/RayNeo io on Mac.app'

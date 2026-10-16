@@ -53,8 +53,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                         apAck|=apToBt&consumed;apToBt&=~consumed;
                         apRxMask&=~((value>>8)&15);apTxMask&=~((value>>12)&15);
                     }
-                    UpdateIPC();return;
                 }
+                UpdateIPC();return;
             }
             long firstLock = alwaysOn ? 0x100 : 0xc0;
             int lockCount = alwaysOn ? 16 : 8;
@@ -123,8 +123,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     uint consumed=(value>>16)&12;
                     btAck|=btToAp&consumed;btToAp&=~consumed;
                 }
-                UpdateIPC();
             }
+            UpdateIPC();
         }
         // AP (M55C0) <-> BTH mailbox, from hal_sys2bth_* (AP) and the matching BTH HAL:
         //  AP  +0x98  bit16+ch raise request to BTH        BTH +0x134 raise request to AP
@@ -158,8 +158,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 else if(offset==0x9c) { bthDoneFrom(ref apReq,ref apDone,hi); apDone&=~lo; }
                 else if(offset==0x1f4) apMask|=value;
                 else apMask&=~value;
-                UpdateIPC();
             }
+            UpdateIPC();
         }
         public uint ReadBthIPC(long offset) {
             lock(ipcLock) {
@@ -176,25 +176,34 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 else if(offset==0x138) { bthDoneFrom(ref bthReq,ref bthDone,hi); bthDone&=~lo; }
                 else if(offset==0x168) bthMask|=value;
                 else if(offset==0x16c) bthMask&=~value;
-                UpdateIPC();
             }
+            UpdateIPC();
         }
         private static void bthDoneFrom(ref uint req,ref uint done,uint consumed) { done|=req&consumed; req&=~consumed; }
+        // Line levels are computed under ipcLock but driven after releasing it: raising an
+        // NVIC line from one CPU thread while another CPU thread waits for ipcLock in an MMIO
+        // access deadlocks Renode otherwise.
         private void UpdateIPC() {
+            var levels=new bool[40];
+            lock(ipcLock) {
+                for(int i=0;i<4;i++) {
+                    uint bit=1u<<i;
+                    levels[i]=(bthReq&apMask&bit)!=0; levels[4+i]=(apDone&(apMask>>16)&bit)!=0;
+                    levels[8+i]=(apReq&bthMask&bit)!=0; levels[12+i]=(bthDone&(bthMask>>16)&bit)!=0;
+                    levels[24+i]=(btToAp&apRxMask&bit)!=0; levels[28+i]=(apAck&apTxMask&bit)!=0;
+                    levels[32+i]=(apToBt&btRxMask&bit)!=0; levels[36+i]=(btAck&btTxMask&bit)!=0;
+                }
+                for(int i=0;i<2;i++) {
+                    levels[16+i]=(coreOneMailbox&(1u<<(21+i)))!=0; levels[18+i]=(coreOneMailbox&(1u<<(18+i)))!=0;
+                    levels[20+i]=(coreOneMailbox&(1u<<(15+i)))!=0; levels[22+i]=(coreOneMailbox&(1u<<(12+i)))!=0;
+                }
+            }
             for(int i=0;i<4;i++) {
-                uint bit=1u<<i;
-                laneARx[i].Set((bthReq&apMask&bit)!=0); laneATx[i].Set((apDone&(apMask>>16)&bit)!=0);
-                laneBRx[i].Set((apReq&bthMask&bit)!=0); laneBTx[i].Set((bthDone&(bthMask>>16)&bit)!=0);
+                c1BtRx[i].Set(levels[24+i]); c1BtTx[i].Set(levels[28+i]);
+                laneARx[i].Set(levels[i]); laneATx[i].Set(levels[4+i]); laneBRx[i].Set(levels[8+i]); laneBTx[i].Set(levels[12+i]);
+                apRx[i].Set(levels[24+i]); apTx[i].Set(levels[28+i]); btRx[i].Set(levels[32+i]); btTx[i].Set(levels[36+i]);
             }
-            for(int i=0;i<2;i++) {
-                c2aRx[i].Set((coreOneMailbox&(1u<<(21+i)))!=0); c2aTx[i].Set((coreOneMailbox&(1u<<(18+i)))!=0);
-                a2cRx[i].Set((coreOneMailbox&(1u<<(15+i)))!=0); a2cTx[i].Set((coreOneMailbox&(1u<<(12+i)))!=0);
-            }
-            for(int i=0;i<4;i++) {
-                uint bit=1u<<i;
-                apRx[i].Set((btToAp&apRxMask&bit)!=0);apTx[i].Set((apAck&apTxMask&bit)!=0);
-                btRx[i].Set((apToBt&btRxMask&bit)!=0);btTx[i].Set((btAck&btTxMask&bit)!=0);
-            }
+            for(int i=0;i<2;i++) { c2aRx[i].Set(levels[16+i]); c2aTx[i].Set(levels[18+i]); a2cRx[i].Set(levels[20+i]); a2cTx[i].Set(levels[22+i]); }
         }
         public GPIO LaneARx0=>laneARx[0]; public GPIO LaneARx1=>laneARx[1]; public GPIO LaneARx2=>laneARx[2]; public GPIO LaneARx3=>laneARx[3];
         public GPIO LaneATx0=>laneATx[0]; public GPIO LaneATx1=>laneATx[1]; public GPIO LaneATx2=>laneATx[2]; public GPIO LaneATx3=>laneATx[3];
@@ -224,9 +233,14 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     bool fromCoreOne=coreOneCpu!=null && machine.SystemBus.TryGetCurrentCPU(out var current) && current==coreOneCpu;
                     this.Log(LogLevel.Info,"C1-IPC {0} {1} 0x{2:X} -> 0x{3:X}",fromCoreOne?"C1":"AP",offset==0x90?"set":"clr",value,coreOneMailbox);
                 }
-                UpdateIPC();
             }
+            UpdateIPC();
         }
+        // The AP<->BTC "intersys" lanes are used first by the AP (btdrv init) and then by the
+        // M55C1 BT stack (same HAL, same bits); the same levels are also offered to the M55C1 NVIC.
+        public GPIO CoreOneBTReceive0=>c1BtRx[0]; public GPIO CoreOneBTReceive1=>c1BtRx[1]; public GPIO CoreOneBTReceive2=>c1BtRx[2]; public GPIO CoreOneBTReceive3=>c1BtRx[3];
+        public GPIO CoreOneBTTransmit0=>c1BtTx[0]; public GPIO CoreOneBTTransmit1=>c1BtTx[1]; public GPIO CoreOneBTTransmit2=>c1BtTx[2]; public GPIO CoreOneBTTransmit3=>c1BtTx[3];
+        private readonly GPIO[] c1BtRx=Lines(4), c1BtTx=Lines(4);
         public GPIO APReceive0 {get;private set;} public GPIO APReceive1 {get;private set;}
         public GPIO APReceive2 {get;private set;} public GPIO APReceive3 {get;private set;}
         public GPIO APTransmit0 {get;private set;} public GPIO APTransmit1 {get;private set;}

@@ -10,7 +10,10 @@ nvic: IRQControllers.NVIC @ sysbus new Bus.BusPointRegistration { address: 0xe00
     systickFrequency: 16384
     IRQ -> cpu@0
 
-itcm: Memory.MappedMemory @ sysbus 0x00100000
+// AP ITCM. CPU-scoped: Renode lets a global mapping win over a CPU-scoped one in the
+// execution path, so every overlapping window (here the M55C1 TCM at 0x0-0x1fffff) must be
+// CPU-scoped on all sides, otherwise one core silently writes another core's memory.
+itcm: Memory.MappedMemory @ sysbus new Bus.BusPointRegistration { address: 0x00100000; cpu: cpu }
     size: 0x100000
 
 flash: Memory.MappedMemory @ { sysbus 0x10000000; sysbus 0x30000000 }
@@ -22,7 +25,9 @@ psram: Memory.MappedMemory @ { sysbus 0x18000000; sysbus 0x38000000 }
 // AP SRAM, 16 MiB at 0x20000000 with the device alias at 0x21000000 (addr_remap_cpu_to_dev).
 // Split in three so the M55C1 core can see its windows (dsp_m55c1_addr_cpu_to_dev):
 //   M55C1 0x20000000-0x203fffff = AP 0x20c00000-0x20ffffff, M55C1 0x0-0x1fffff = AP 0x20e00000-.
-sram: Memory.MappedMemory @ { sysbus 0x20000000; sysbus 0x21000000 }
+// 0x20000000 is CPU-scoped for the same reason (M55C1 sees its own window there); the
+// device alias 0x21000000 stays global for DMA/LCDC/GPU.
+sram: Memory.MappedMemory @ { sysbus 0x21000000; sysbus new Bus.BusPointRegistration { address: 0x20000000; cpu: cpu }; sysbus new Bus.BusPointRegistration { address: 0x20000000; cpu: bth }; sysbus new Bus.BusPointRegistration { address: 0x20000000; cpu: btc } }
     size: 0xc00000
 
 sramC1Data: Memory.MappedMemory @ { sysbus 0x20c00000; sysbus 0x21c00000; sysbus new Bus.BusPointRegistration { address: 0x20000000; cpu: c1 } }
@@ -103,6 +108,14 @@ sysCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40000000
     APToCoreOneRx1 -> c1Nvic@89
     APToCoreOneTx0 -> c1Nvic@91
     APToCoreOneTx1 -> c1Nvic@92
+    CoreOneBTReceive0 -> c1Nvic@104
+    CoreOneBTReceive1 -> c1Nvic@105
+    CoreOneBTReceive2 -> c1Nvic@43
+    CoreOneBTReceive3 -> c1Nvic@119
+    CoreOneBTTransmit0 -> c1Nvic@102
+    CoreOneBTTransmit1 -> c1Nvic@103
+    CoreOneBTTransmit2 -> c1Nvic@29
+    CoreOneBTTransmit3 -> c1Nvic@30
     coreOneCpu: c1
 
 ispi: SPI.BES1700_ISPI @ sysbus 0x4000a000
@@ -127,6 +140,7 @@ i2c0: I2C.DesignWare_APB_I2C @ sysbus 0x40006000
 i2c1: I2C.DesignWare_APB_I2C @ sysbus 0x40007000
 
 ots: Sensors.BES1700_OTS @ i2c0 0x74
+    MotionIRQ -> gpio2@14
 
 nand: SPI.BES1700_NAND @ sysbus 0x40198000
     RxRequest -> dma@0
@@ -167,12 +181,23 @@ btcAnalog: Miscellaneous.BES1700_RegisterBank @ sysbus 0x6d010000
 btcBleExchange: Memory.MappedMemory @ sysbus 0x6d070000
     size: 0x4000
 
+// Crown key P0_1 (active low, pull-up); see .local/research/parallel/input.md.
 gpio0: GPIOPort.BES1700_GPIO @ sysbus 0x40081000
+    pullUps: 0x2
 
 gpio1: GPIOPort.BES1700_GPIO @ sysbus 0x40089000
     panelSPI: true
 
+// GPIO2 bit14 = OTS (crown rotation) motion interrupt, active low.
 gpio2: GPIOPort.BES1700_GPIO @ sysbus 0x4008a000
+    pullUps: 0x4000
+
+// PSC: GPIO interrupt aggregation (hal_psc_gpio_irq_*), NVIC line 2.
+psc: Miscellaneous.BES1700_PSC @ sysbus 0x40085000
+    gpio0: gpio0
+    gpio1: gpio1
+    gpio2: gpio2
+    IRQ -> nvic@2
 
 panelSPI: SPI.BES1700_PanelSPI @ sysbus 0x40009000
     panel: gpio1

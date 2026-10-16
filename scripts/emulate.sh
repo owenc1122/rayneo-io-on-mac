@@ -19,12 +19,19 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 python3 scripts/make-flash-image.py "$fwdir" "$out/flash" > "$out/flash-layout.log"
 # NAND resource partitions (littlefs). Optional fonts: FONTS=<dir with .ttf> (factory fonts are not in the OTA set).
-if [ -x .local/venv/bin/python ]; then
-    .local/venv/bin/python scripts/make-nand-image.py "$fwdir" "$out/nand" ${FONTS:+--fonts "$FONTS" --substitute} > "$out/nand-layout.log"
+venv=${RAYNEO_VENV:-$root/.local/venv}
+if [ -x "$venv/bin/python" ]; then
+    "$venv/bin/python" scripts/make-nand-image.py "$fwdir" "$out/nand" ${FONTS:+--fonts "$FONTS" --substitute} > "$out/nand-layout.log"
 else
-    echo 'note: run scripts/setup-tools.sh to build the NAND resource image' >&2
+    echo 'note: no littlefs venv (scripts/setup-tools.sh); NAND resources not prepared' >&2
 fi
 python3 scripts/make-resc.py "$root" "$out" "$duration" "$extra" > "$out/boot.resc"
-"$renode" --disable-gui --console --plain -e "include @$out/boot.resc" > "$out/boot.log" 2>&1 < /dev/null || true
+if [ -n "${RENODE_MONITOR_PORT:-}" ]; then
+    # Interactive (Mac app): monitor on a local TCP port for input injection.
+    exec "$renode" --disable-gui --plain -P "$RENODE_MONITOR_PORT" -e "include @$out/boot.resc" > "$out/boot.log" 2>&1 < /dev/null
+fi
+# No --console: Renode 1.17 crashes (SemaphoreFullException in ConsoleIOSource) a few
+# minutes after its console stdin hits EOF. The monitor listens on a local port instead.
+"$renode" --disable-gui --plain -P "${RENODE_BATCH_PORT:-23457}" -e "include @$out/boot.resc" > "$out/boot.log" 2>&1 < /dev/null || true
 grep -E '^\[AP|^\[BTH|^\[C1|M55C1 released|BTH released|BTC released|Scanout' "$out/boot.log" | tail -40
 echo "log: $out/boot.log"

@@ -221,7 +221,8 @@ namespace Antmicro.Renode.Peripherals.Video
             uint fA25=S(0xa25),fA24=S(0xa24);
             bool useB=lastSrcBank==1 && S(0xa28)!=0;
             uint f=useB?fA24:fA25;
-            return new Src{Valid=true,Format=f&~0x30000u,Filter=f&0x30000,Address=useB?S(0xa28):S(0xa29),
+            // 0x01000100 = src_premultiply_enable (vg_lite.c), not part of the format code.
+            return new Src{Valid=true,Format=f&~0x30000u&~0x01000100u,Filter=f&0x30000,Address=useB?S(0xa28):S(0xa29),
                            Stride=(int)((useB?S(0xa2a):S(0xa2b))&0xfffffff),
                            Width=(int)((useB?S(0xa2e):S(0xa2f))&0xffff),Height=(int)((useB?S(0xa2e):S(0xa2f))>>16)};
         }
