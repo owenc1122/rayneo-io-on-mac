@@ -214,9 +214,12 @@ gpio0: GPIOPort.BES1700_GPIO @ sysbus 0x40081000
 gpio1: GPIOPort.BES1700_GPIO @ sysbus 0x40089000
     panelSPI: true
 
-// GPIO2 bit14 = OTS (crown rotation) motion interrupt, active low.
+// GPIO2 (pin 64+n): bit14 = OTS (crown rotation) motion interrupt, active low;
+// bit20 = VBUS detect (cb_vbus_detect_venus pin 0x54, LOW = cable in), idles high = unplugged;
+// bits22/23 = MAX17335 left/right ALRT (pins 0x56/0x57), active low.
+// Plug the charger from the monitor: `gpio2 SetInput 20 false`.
 gpio2: GPIOPort.BES1700_GPIO @ sysbus 0x4008a000
-    pullUps: 0x4000
+    pullUps: 0xd04000
 
 // PSC: GPIO interrupt aggregation (hal_psc_gpio_irq_*), NVIC line 2.
 psc: Miscellaneous.BES1700_PSC @ sysbus 0x40085000
