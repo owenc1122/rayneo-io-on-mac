@@ -4,10 +4,13 @@ seconds=0 means run until the process is killed (used by the Mac app)."""
 import sys
 from pathlib import Path
 root, out, seconds = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+def at(path):
+    # Renode @path tokens end at a space; escape spaces (e.g. ~/Library/Application Support).
+    return '@' + str(path).replace(' ', '\\ ')
 extra = sys.argv[4] if len(sys.argv) > 4 else ''
 lines = []
 for name in (root / 'platform/peripherals.list').read_text().split():
-    lines.append(f'include @{root}/platform/peripherals/{name}.cs')
+    lines.append(f'include {at(root / "platform/peripherals" / (name + ".cs"))}')
 printf = (root / 'platform/hooks/printf.py').read_text()
 syslog_hook = printf + '''
 bus = machine.SystemBus
@@ -56,12 +59,12 @@ if 0 < n < 4096:
 '''
 lines += [
     'mach create "RayNeo"',
-    f'machine LoadPlatformDescription @{root}/platform/best1700.repl',
-    f'sysbus LoadBinary @{out}/flash/flash0.bin 0x10000000',
-    f'sysbus LoadBinary @{out}/flash/flash1.bin 0x28000000',
+    f'machine LoadPlatformDescription {at(root / "platform/best1700.repl")}',
+    f'sysbus LoadBinary {at(out / "flash/flash0.bin")} 0x10000000',
+    f'sysbus LoadBinary {at(out / "flash/flash1.bin")} 0x28000000',
     f'lcdc FrameImagePath "{out}/frame.pgm"',
-] + ([f'nand LoadImage @{out}/nand/nand-data.bin'] if (out / 'nand/nand-data.bin').exists() else []) + (
-    [f'nand LoadState @{state}/nand-state.bin'] if (state := __import__('os').environ.get('STATE')) and Path(state, 'nand-state.bin').exists() else []) + ([] if not __import__('os').environ.get('APIRQDBG') else [
+] + ([f'nand LoadImage {at(out / "nand/nand-data.bin")}'] if (out / 'nand/nand-data.bin').exists() else []) + (
+    [f'nand LoadState {at(Path(state, "nand-state.bin"))}'] if (state := __import__('os').environ.get('STATE')) and Path(state, 'nand-state.bin').exists() else []) + ([] if not __import__('os').environ.get('APIRQDBG') else [
     'cpu AddHook 0x1008bc """\nn=self.GetRegister(0).RawValue\nif n>=100 and n<=115: print(\'[APIRQ] %d sp=0x%x\' % (n, self.GetRegister(13).RawValue))\n"""',
     'cpu AddHook 0x105dbb14 """\nbus=machine.SystemBus\nc=self.GetRegister(1).RawValue\nprint(\'[APFAULT] ctx=0x%x \' % c + \' \'.join([\'%08x\' % bus.ReadDoubleWord(c+4*i) for i in range(24)]))\n"""',
     'cpu AddHook 0x1008f0 """\nr=self.GetRegister(5).RawValue\nif (r & 1)==0: print(\'[APIRQ] even handler 0x%x irq %d\' % (r, self.GetRegister(4).RawValue))\n"""',
@@ -101,13 +104,13 @@ lines += [
 ]) + [
 ]
 if extra:
-    lines.append(f'include @{extra}')
+    lines.append(f'include {at(extra)}')
 if seconds != '0':
     lines.append(f'emulation RunFor "{seconds}"')
     # SCENARIO=<file>: monitor commands run after the boot period (input tests, frame captures).
     scenario = __import__('os').environ.get('SCENARIO')
     if scenario:
-        lines += [l.replace('@OUT/', f'@{out}/') for l in Path(scenario).read_text().splitlines() if l.strip() and not l.startswith('#')]
+        lines += [l.replace('@OUT/', at(out) + '/') for l in Path(scenario).read_text().splitlines() if l.strip() and not l.startswith('#')]
     lines += [
               'console_log `cpu PC`', 'console_log `cpu LR`', 'console_log `bth PC`', 'console_log `c1 PC`', 'console_log `btc PC`', 'quit']
 else:

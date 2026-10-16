@@ -64,7 +64,15 @@ import SwiftUI
         guard FileManager.default.fileExists(atPath: url.appendingPathComponent("OtaFileInfo.json").path) else {
             failure = "所选文件夹中没有 OtaFileInfo.json"; return
         }
-        UserDefaults.standard.set(url.path, forKey: Self.firmwareKey)
+        // Keep a private copy: later launches never need access to the user's folders
+        // (Documents/Desktop/Downloads are privacy-protected and would block on a system prompt).
+        let copy = dataDirectory.appendingPathComponent("firmware/\(url.lastPathComponent)", isDirectory: true)
+        let files = FileManager.default
+        try? files.createDirectory(at: copy.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? files.removeItem(at: copy)
+        do { try files.copyItem(at: url, to: copy) } catch { failure = "复制固件失败：\(error.localizedDescription)"; return }
+        UserDefaults.standard.set(copy.path, forKey: Self.firmwareKey)
+        cachedStateDirectory = nil
         restart()
     }
 
@@ -148,11 +156,14 @@ import SwiftUI
 
     /// Saved glasses (flash + NAND as the firmware left them), one per firmware build, so settings,
     /// pairing and files survive like on real glasses. Deleted by "恢复出厂设置".
+    private var cachedStateDirectory: URL?
     private var stateDirectory: URL? {
+        if let cachedStateDirectory { return cachedStateDirectory }
         guard let firmware = firmwareDirectory,
               let image = try? Data(contentsOf: firmware.appendingPathComponent("nuttx_ap.bin"), options: .mappedIfSafe) else { return nil }
         let digest = SHA256.hash(data: image).prefix(8).map { String(format: "%02x", $0) }.joined()
-        return dataDirectory.appendingPathComponent("state/\(digest)", isDirectory: true)
+        cachedStateDirectory = dataDirectory.appendingPathComponent("state/\(digest)", isDirectory: true)
+        return cachedStateDirectory
     }
 
     /// Asks the running emulator to write its flash and NAND, then waits (bounded) for the files.
@@ -162,8 +173,8 @@ import SwiftUI
         let flash = state.appendingPathComponent("flash0.bin"), nand = state.appendingPathComponent("nand-state.bin")
         let before = [flash, nand].map { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast }
         command("pause")
-        command("nor SaveImage @\(flash.path)")
-        command("nand SaveState @\(nand.path)")
+        command("nor SaveImage @\(flash.path.replacingOccurrences(of: " ", with: "\\ "))")
+        command("nand SaveState @\(nand.path.replacingOccurrences(of: " ", with: "\\ "))")
         let deadline = Date().addingTimeInterval(6)
         while Date() < deadline {
             let after = [flash, nand].map { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast }

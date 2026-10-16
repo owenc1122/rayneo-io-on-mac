@@ -1,0 +1,23 @@
+# Crown rotation on the home page and in the app list. Captures: shot-<step>.pgm next to boot.log.
+lcdc SaveFrame @OUT/shot-0-home.pgm
+i2c0.ots Rotate 400
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-1-cw.pgm
+i2c0.ots Rotate -400
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-2-ccw.pgm
+i2c0.ots Rotate -400
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-3-ccw2.pgm
+gpio0 Pulse 1 false 120
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-4-list.pgm
+i2c0.ots Rotate 400
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-5-list-cw.pgm
+i2c0.ots Rotate 400
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-6-list-cw2.pgm
+i2c0.ots Rotate -400
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-7-list-ccw.pgm
