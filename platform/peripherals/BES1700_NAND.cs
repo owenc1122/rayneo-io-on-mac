@@ -108,6 +108,40 @@ namespace Antmicro.Renode.Peripherals.SPI
         }
         private bool pendingLoad;
         private uint pendingCommand;
+        // Loads a raw data image (2048 bytes per page, no spare area) such as the one
+        // produced by scripts/make-nand-image.py. All-0xFF pages stay erased; spare = 0xFF.
+        public void LoadImage(string path) {
+            var data=System.IO.File.ReadAllBytes(path);
+            int loaded=0;
+            for(uint page=0;page<PageCount && (page+1)*2048<=data.Length;page++) {
+                int start=(int)(page*2048);bool erased=true;
+                for(int i=0;i<2048;i++) if(data[start+i]!=0xff) {erased=false;break;}
+                if(erased) continue;
+                var target=new byte[PageSize];FillErased(target);Array.Copy(data,start,target,0,2048);
+                pages[page]=target;loaded++;
+            }
+            this.Log(LogLevel.Info,"Loaded {0} programmed pages from {1}",loaded,path);
+        }
+        // Persistent state between simulator sessions: every programmed page (data + spare) as
+        // "RNNS" u32 count, then (u32 page, 2176 bytes) records. LoadState replaces those pages.
+        public void SaveState(string path) {
+            string temporary=path+".tmp";
+            using(var w=new System.IO.BinaryWriter(System.IO.File.Create(temporary))) {
+                w.Write(System.Text.Encoding.ASCII.GetBytes("RNNS"));w.Write((uint)pages.Count);
+                foreach(var kv in pages) {w.Write(kv.Key);w.Write(kv.Value);}
+            }
+            if(System.IO.File.Exists(path)) System.IO.File.Replace(temporary,path,null); else System.IO.File.Move(temporary,path);
+            this.Log(LogLevel.Info,"Saved {0} NAND pages to {1}",pages.Count,path);
+        }
+        public void LoadState(string path) {
+            using(var r=new System.IO.BinaryReader(System.IO.File.OpenRead(path))) {
+                if(System.Text.Encoding.ASCII.GetString(r.ReadBytes(4))!="RNNS") throw new ArgumentException("not a NAND state file");
+                uint count=r.ReadUInt32();
+                pages.Clear();
+                for(uint i=0;i<count;i++) {uint page=r.ReadUInt32();pages[page]=r.ReadBytes(PageSize);}
+            }
+            this.Log(LogLevel.Info,"Restored NAND state ({0} pages) from {1}",pages.Count,path);
+        }
         public byte ReadCache(long offset) {return offset>=0 && offset<PageSize?cache[(int)offset]:(byte)0xff;}
         private void ResetDevice(){Array.Clear(features,0,features.Length);features[0xa0]=0x38;features[0xb0]=0x10;FillErased(cache);}
         private static void FillErased(byte[] data){for(int i=0;i<data.Length;i++)data[i]=0xff;}

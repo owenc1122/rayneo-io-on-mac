@@ -1,0 +1,31 @@
+# Crown input on the stock home page. Captures: shot-<step>.pgm next to boot.log.
+lcdc SaveFrame @OUT/shot-0-home.pgm
+gpio0 Pulse 1 false 120
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-1-click.pgm
+gpio0 Pulse 1 false 120
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-2-click2.pgm
+i2c0.ots Rotate 400
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-3-cw.pgm
+i2c0.ots Rotate 400
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-4-cw2.pgm
+gpio0 Pulse 1 false 120
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-5-open.pgm
+gpio0 Pulse 1 false 120
+emulation RunFor "0.15"
+gpio0 Pulse 1 false 120
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-6-double.pgm
+i2c0.ots Rotate -400
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-7-ccw.pgm
+i2c0.ots Rotate -400
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-8-ccw2.pgm
+gpio0 Pulse 1 false 1300
+emulation RunFor "2.5"
+lcdc SaveFrame @OUT/shot-9-long.pgm

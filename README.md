@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-22E05A?style=flat-square"></a>
-  <img alt="Status: experimental" src="https://img.shields.io/badge/status-experimental-orange?style=flat-square">
+  <img alt="Status: boots to home" src="https://img.shields.io/badge/status-boots%20to%20home-22E05A?style=flat-square">
   <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-2E8BFF?style=flat-square">
   <img alt="Built on Renode" src="https://img.shields.io/badge/built%20on-Renode-6E40C9?style=flat-square">
   <img alt="Unofficial" src="https://img.shields.io/badge/unofficial-not%20affiliated%20with%20RayNeo-555?style=flat-square">
@@ -37,24 +37,26 @@ Developing for smart glasses usually means flashing a real device for every chan
 
 ## Status
 
-This is an **experiment, not a finished emulator.** It does not reach a usable home screen yet.
+The unmodified stock firmware now **boots to its real home screen and responds to the crown**. It is still not a complete device: there is no phone link and no audio yet.
 
 <p align="center">
-  <img src="docs/media/boot-progress.svg" alt="Boot progress: the stock firmware loads, enters NuttX, runs board init, mounts storage and shows its boot logo; it stops when the AP opens the BTH subsystem" width="100%">
+  <img src="docs/media/boot-progress.svg" alt="Boot progress: all four cores start, the stock launcher reaches its home screen, crown input works; phone link, audio and head motion are not done yet" width="100%">
 </p>
 
 | Area | State | Notes |
 |---|---|---|
-| AP core boots NuttX | Working | Unmodified AP firmware enters the NuttX kernel and completes the board init calls we have observed |
-| Boot logo in the Mac window | Working | The display controller model scans out memory the firmware actually wrote; the window shows that frame |
-| BTC controller | Working | Its code executes on the emulated CPU |
-| Storage (NOR, NAND, PSRAM, DMA) | Initial model | Firmware formats and mounts the emulated NAND (in-memory, fresh each boot); data path checked by `scripts/check-storage.py` |
-| Board I/O (GPIO, SPI, I2C, panel, LCD DMA) | Initial model | Enough for boot; panel checked by `scripts/check-panel.py` |
-| BTH subsystem | **In progress** | Boot stops when the AP opens BTH, because it needs BTH in its *installed* flash format. An installed-image builder and a BTH board model are being brought up |
-| GPU | Partial | Init registers only; no draw commands executed, and it never fakes completion |
-| Other cores, IPC, resource filesystem, input | Not started | |
+| Four cores (AP, M55C1, BTH, BTC) | Working | All start from installed-format flash images built from your OTA set; inter-core mailboxes and rpmsg run |
+| Home screen | Working | The stock launcher reaches its home page about 12 s into emulated time; a paired-phone record is seeded in NOR user data (`BOND=0` keeps the factory pairing guide) |
+| Fonts | Working | All 18 `nand_font` files load: four come from your own RayNeo AI app, the rest are the same open-source families fetched upstream (`scripts/prepare-fonts.sh`) |
+| Clock, batteries | Working | PMU RTC follows the Mac clock; two MAX17335 gauges report charge; USB detect idles unplugged |
+| Crown | Working | Press, double press, long press and rotation are handled by the firmware itself (`Tests/scenarios/`) |
+| Timers, I2C, GPU, display | Working | SP804 hwtimers, a DesignWare I2C model, VGLite command execution, two-eye scan-out |
+| Persistence | Working | The app saves NOR and NAND on quit and restores them, so settings and pairing survive; "Factory reset" clears them |
+| Bluetooth controller | Partial | Stock BTC firmware answers host HCI and starts advertising; no baseband timing or radio, so no phone can connect |
+| Audio (HiFi4 DSP, mic, speaker) | Not started | |
+| Head motion, light sensor, Wi-Fi | Not started | IMU returns static data |
+| Speed | Slow | About 1/8 of real time; boot to home takes about 2 minutes |
 | Calibration | Unverified | Several register, ID and clock values are inferred from firmware, not measured on hardware |
-| Packaging | Not yet | Verified only on the author's Mac; not a portable app |
 
 The detailed engineering log lives in [`docs/DEV-NOTES.md`](docs/DEV-NOTES.md).
 
@@ -65,20 +67,22 @@ Requirements: macOS 14 or later, Xcode command line tools, Python 3, and [Renode
 ```sh
 git clone https://github.com/owenc1122/rayneo-io-on-mac.git && cd rayneo-io-on-mac
 
-# 1. Renode: put it at .local/renode/Renode.app, or export RENODE=/path/to/renode
-# 2. Your firmware: .local/firmware.bin (AP image), or an extracted OTA file set
+sh scripts/setup-tools.sh                    # one-time: Python venv with littlefs-python and fonttools
+sh scripts/prepare-fonts.sh /path/to/RayNeo\ AI.app   # glasses fonts from your own RayNeo AI app
+# Renode: put it at .local/renode/Renode.app, or export RENODE=/path/to/renode
 
-swift test                                   # unit tests
-sh scripts/build-app.sh                      # builds "build/RayNeo io on Mac.app" (local ad-hoc signature)
-sh scripts/run-app.sh                        # boots .local/firmware.bin and shows the display
-sh scripts/emulate.sh <ota-files-dir> 15     # headless run, 15 s of emulated time
+FONTS=.local/fonts-factory sh scripts/emulate.sh <ota-files-dir> 30 .local/runs/demo   # headless run
+SCENARIO=Tests/scenarios/crown.txt FONTS=.local/fonts-factory sh scripts/emulate.sh <ota-files-dir> 20 .local/runs/crown
+
+BUNDLE_RENODE=1 sh scripts/build-app.sh      # builds "build/RayNeo io on Mac.app"
+sh scripts/run-app.sh
 ```
 
-Each run writes `boot.log` and the received `frame.pgm` under `.local/runs/` (git-ignored). The app shows only frames produced by the current run; it never loads stored screenshots.
+In the app: hold Space to press the crown (hold longer for a long press), D for a double press, arrow keys or the scroll wheel to rotate. The app asks for your firmware folder once and keeps a private copy; run data lives in `~/Library/Application Support/RayNeo io on Mac/`.
 
 ### Bring your own firmware
 
-No vendor firmware, OTA package, or images and assets extracted from them are included. Get the Strix OS files from your own device or another lawful source and keep them under `.local/` (git-ignored): the AP image as `.local/firmware.bin`, or pass an extracted OTA file set (with `OtaFileInfo.json`) to `scripts/emulate.sh`. The scripts only read these files and never modify them.
+No vendor firmware, OTA package, fonts, or images and assets extracted from them are included. Get the Strix OS files from your own device or another lawful source and keep them under `.local/` (git-ignored), or choose them in the app. The scripts only read these files and never modify them.
 
 ## Architecture
 
@@ -95,16 +99,17 @@ No vendor firmware, OTA package, or images and assets extracted from them are in
 
 ## Roadmap
 
-- [x] AP boots NuttX on the emulated CPU, unmodified
-- [x] Display scan-out to a native Mac window (boot logo)
-- [x] Storage and DMA data path with automated checks
-- [ ] **BTH bring-up**: installed-format flash image, BTH reset entry, address aliases
-- [ ] AP and BTH inter-processor communication
-- [ ] Resource filesystem and a boot that gets past the logo
-- [ ] GPU draw commands
-- [ ] Crown and button input from the Mac keyboard and trackpad
-- [ ] Dual-panel layout and full display formats
-- [ ] Portable, signed app bundle
+- [x] All four cores boot the unmodified firmware
+- [x] Display scan-out, GPU draw commands, two-eye layout
+- [x] Resource filesystem and fonts; stock home screen
+- [x] Crown press and rotation from the Mac keyboard and trackpad
+- [x] Clock, battery gauges, hardware timers, I2C
+- [x] Glasses state saved between app sessions
+- [ ] Bluetooth baseband timing and a phone link (virtual peer or a real phone through the Mac)
+- [ ] Audio: HiFi4 DSP, microphone and speaker through the Mac
+- [ ] Head motion from the Mac, light and wear sensors
+- [ ] Real-time speed
+- [ ] Signed, notarized app bundle
 
 ## How to help
 
@@ -133,20 +138,22 @@ Original code is released under the [MIT License](LICENSE). Renode is MIT licens
 
 ### 当前进度（如实说明）
 
-**整机模拟器尚未完成，还不能进入可操作的桌面。**
+**原版固件已能进入真实桌面，并响应表冠操作；但还不是完整的眼镜：没有手机连接，也没有声音。**
 
 | 部分 | 状态 | 说明 |
 |---|---|---|
-| AP 启动 NuttX | 可用 | 未改指令的 AP 固件进入 NuttX 内核，完成已观察到的板级初始化 |
-| Mac 窗口显示开机标志 | 可用 | 显示控制器读取固件实际写入的内存，窗口显示该帧 |
-| BTC 控制器 | 可用 | 代码在模拟 CPU 上执行 |
-| 存储（NOR/NAND/PSRAM/DMA） | 初步模型 | 固件能格式化并挂载模拟 NAND（仅内存、每次重新创建），`scripts/check-storage.py` 验证 |
-| 板级 I/O（GPIO/SPI/I2C/屏幕/LCD DMA） | 初步模型 | 满足启动所需，`scripts/check-panel.py` 验证屏幕 |
-| BTH 子系统 | **进行中** | AP 打开 BTH 时需要**已安装格式**的 BTH 镜像，启动在此停止；已安装镜像生成器和 BTH 板级模型正在调试 |
-| GPU | 部分 | 只模拟初始化寄存器，不执行绘制，也不会假报完成 |
-| 其他核、核间通信、资源文件系统、输入 | 未开始 | |
+| 四个核（AP、M55C1、BTH、BTC） | 可用 | 由你的 OTA 文件生成已安装格式镜像后全部启动，核间邮箱和 rpmsg 正常 |
+| 桌面 | 可用 | 原厂 Launcher 约在模拟时间 12 秒进入主页；NOR 用户数据区预置已配对手机记录（`BOND=0` 保留出厂配对引导） |
+| 字体 | 可用 | 18 个字体全部加载：4 个来自你自己的雷鸟 AI App，其余为同一开源字族（`scripts/prepare-fonts.sh`） |
+| 时间、电池 | 可用 | PMU 时钟跟随 Mac；两颗 MAX17335 电量计；USB 检测默认未插线 |
+| 表冠 | 可用 | 单击、双击、长按、旋转都由固件自己处理（`Tests/scenarios/`） |
+| 定时器、I2C、GPU、显示 | 可用 | SP804 硬件定时器、DesignWare I2C、VGLite 绘制、双眼扫描输出 |
+| 状态保存 | 可用 | 应用退出时保存 NOR 和 NAND，下次恢复；「恢复出厂设置」清除 |
+| 蓝牙控制器 | 部分 | 原厂 BTC 固件能应答主机 HCI 并开始广播；没有基带时序和射频，手机还连不上 |
+| 音频（HiFi4 DSP、麦克风、扬声器） | 未开始 | |
+| 头部动作、光感、Wi‑Fi | 未开始 | IMU 只有静态数据 |
+| 速度 | 慢 | 约为实时的 1/8，开机到桌面约 2 分钟 |
 | 校准 | 未验证 | 多处寄存器、ID、时钟值从固件推断，未经实机测量 |
-| 打包 | 暂无 | 只在作者本机验证，尚非可移植应用 |
 
 详细开发记录见 [`docs/DEV-NOTES.md`](docs/DEV-NOTES.md)。
 
@@ -155,15 +162,13 @@ Original code is released under the [MIT License](LICENSE). Renode is MIT licens
 需要 macOS 14+、Xcode 命令行工具、Python 3，以及另行安装的 Renode（MIT，**不随仓库分发**）。
 
 ```sh
-# Renode 放到 .local/renode/Renode.app，或设置 RENODE=/path/to/renode
-# 固件：.local/firmware.bin（AP 镜像），或解出的 OTA 文件集目录
-swift test
-sh scripts/build-app.sh
-sh scripts/run-app.sh
-sh scripts/emulate.sh <OTA 文件目录> 15
+sh scripts/setup-tools.sh
+sh scripts/prepare-fonts.sh /path/to/RayNeo\ AI.app     # 从你自己的雷鸟 AI App 生成眼镜字体
+FONTS=.local/fonts-factory sh scripts/emulate.sh <OTA 文件目录> 30 .local/runs/demo
+BUNDLE_RENODE=1 sh scripts/build-app.sh && sh scripts/run-app.sh
 ```
 
-运行记录（`boot.log`、`frame.pgm`）写入 `.local/runs/`（已忽略）。应用只显示本次运行产生的帧，不载入历史截图。
+应用里：按住空格=按表冠（按久就是长按），D=双击，方向键或滚轮=旋转。
 
 ### 自备固件
 
@@ -171,7 +176,7 @@ sh scripts/emulate.sh <OTA 文件目录> 15
 
 ### 架构与路线图
 
-启动进度见上方 [Status](#status) 图，架构图见 [Architecture](#architecture)。下一步依次是：BTH 已安装镜像与复位入口、AP 与 BTH 核间通信、资源文件系统并越过开机标志、GPU 绘制、键盘/触控板映射为表冠输入、双屏布局、可移植签名应用。
+启动进度见上方 [Status](#status) 图，架构图见 [Architecture](#architecture)。下一步：蓝牙基带时序与手机连接（虚拟手机，或经 Mac 桥接真手机）、音频（HiFi4 DSP、Mac 麦克风/扬声器）、用 Mac 模拟头部动作及光感/佩戴传感器、提速到实时、签名公证的应用。
 
 ### 如何参与
 
