@@ -224,9 +224,9 @@ class RnlinkPhone:
         import json
         # Dashboard command (launcher receiveMessage type 0x12 -> DashboardProtocolController::decode,
         # which cJSON-parses {"cmd","payload":{value,mode,data}}; data is a nested JSON string).
-        # applyCurrentWeatherUpdate reads data.temp (number), data.location (string) and validates
-        # data.icon is an OBJECT (its contents aren't parsed). cmd current_weather_update.
-        data = json.dumps({'icon': {'code': icon}, 'temp': temp, 'location': location})
+        # applyCurrentWeatherUpdate reads data.icon (number), data.temp (number), data.location
+        # (string). cmd current_weather_update; glasses ack payload.value 0 = accepted, 1 = rejected.
+        data = json.dumps({'icon': icon, 'temp': temp, 'location': location})
         msg = json.dumps({'cmd': 'current_weather_update', 'payload': {'value': 0, 'mode': 0, 'data': data}})
         self.say('rnlink -> weather %s' % msg)
         self.tx(0x0f, pb_msg(0x12, message=msg))
