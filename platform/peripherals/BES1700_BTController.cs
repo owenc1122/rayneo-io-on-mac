@@ -115,8 +115,15 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             ulong len=(dur&0x8000)!=0 ? (ulong)(dur&0x7fff)*HalfSlot : (ulong)dur*2;
             if(len==0) len=HalfSlot;
             SetStatus(a,1);
-            pending.Add(new Activity { Index=idx, Start=start, Length=len, Mode=ctrl&7 });
-            if(TraceEvents) this.Log(LogLevel.Info,"ET{0} mode {1} start {2} (now {3}) len {4}us",idx,ctrl&7,start,Now,len/2);
+            pending.Add(new Activity { Index=idx, Start=start, Planned=start, Length=len, Mode=ctrl&7, Cs=exchangeTable+(ulong)bus.ReadWord(a+8)*8 });
+            if(TraceEvents) {
+                // Research aid: scheduler callback (sch_prog env 0x68008898) and the control structure.
+                uint cb=bus.ReadDoubleWord(0x68008898UL+(ulong)idx*16+4);
+                ulong cs=exchangeTable+(ulong)bus.ReadWord(a+8)*8;
+                var words=new System.Text.StringBuilder();
+                if(dumped.Add(cs)) for(ulong o=0;o<0xb0;o+=2) words.AppendFormat("{0:x4} ",bus.ReadWord(cs+o));
+                this.Log(LogLevel.Info,"ET{0} mode {1} ctrl {5:x4} start {2} (now {3}) len {4}us cb {6:x} cs {7:x} {8}",idx,ctrl&7,start,Now,len/2,ctrl,cb,cs,words);
+            }
         }
         // Clock values are 28-bit half-slot counts; place a target within half a wrap of now.
         private ulong Unwrap(ulong ticks) {
@@ -169,6 +176,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 }
                 SetStatus(exchangeTable+(ulong)nextAct.Index*16,2);
                 running=nextAct; running.Start=now; current=nextAct.Index;
+                if(running.Mode==2 && PeerPort!=0) AirExchange(ref running);
             }
             if(fifo.Count>0) raw|=FifoInt;
             Update();
@@ -184,13 +192,143 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private ulong Now { get { uint v=(uint)clock.Value; if(v<lastClock) clockHigh+=1UL<<32; lastClock=v; return clockHigh|v; } }
         private uint lastClock; private ulong clockHigh;
 
-        private struct Activity { public int Index; public ulong Start; public ulong Length; public int Mode; }
+        private struct Activity { public int Index; public ulong Start; public ulong Planned; public ulong Length; public int Mode; public ulong Cs; }
+
+        // ---- Virtual BLE peer ("air" bridge) -------------------------------------------------
+        // With PeerPort set, every BLE activity is handed in lock step to a peer process on
+        // 127.0.0.1:PeerPort (text lines). The peer plays the remote device: it may answer an
+        // advertising event with a CONNECT_IND and supplies the central's PDU for each connection
+        // event; the glasses' own PDUs (TX descriptors) are reported back. This replaces the radio.
+        //   model -> peer: "ADV <cs> <fmt> <hdr>:<payload> ..."   peer -> model: "CONNECT <hex>" | "NONE"
+        //   model -> peer: "EVT <cs> <fmt>"                        peer -> model: "RX <hdr> <hex>" | "NONE"
+        //   model -> peer: "TX <cs> <hdr>:<payload> ..."           peer -> model: "OK"
+        // BLE exchange memory (BTC IP 1): RX descriptor ring (32 B, word0 = RXDONE bit15 | next>>3),
+        // current RX descriptor in BLE core register 0x828; descriptor +2 status, +4 header,
+        // +6 channel/rate, +8/+0xa sync half-slot clock, +0xc fine count, +0x10 RAL ptr,
+        // +0x14 data ptr (halfwords). Control structure: +0 format, +0x24 TX descriptor ptr (>>3);
+        // TX descriptor: +0 TXDONE bit15 | next>>3, +2 header, +4 data ptr (halfwords).
+        public int PeerPort { get; set; }
+
+        private void AirExchange(ref Activity act) {
+            var bus=machine.SystemBus;
+            int fmt=bus.ReadWord(act.Cs)&0x1f;
+            try {
+                if(fmt==AdvFormat) {
+                    var line=new System.Text.StringBuilder();
+                    line.AppendFormat("ADV {0:x} {1} {2}",act.Cs,fmt,BdAddr(act.Cs));
+                    foreach(var d in TxChain(act.Cs,false)) line.Append(' ').Append(d);
+                    string reply=PeerCall(line.ToString());
+                    if(reply.StartsWith("CONNECT ")) {
+                        var payload=Hex(reply.Substring(8));
+                        WriteRx(0x05|(payload.Length<<8)|0x40,payload,act.Start+600);
+                        act.Length=Math.Min(act.Length,1200);   // reception ends the event
+                    }
+                    return;
+                }
+                string rx=PeerCall(string.Format("EVT {0:x} {1}",act.Cs,fmt));
+                if(rx.StartsWith("RX ")) {
+                    var parts=rx.Split(' ');
+                    int hdr=Convert.ToInt32(parts[1],16);
+                    var payload=parts.Length>2 ? Hex(parts[2]) : new byte[0];
+                    // Sync point the peripheral scheduler expects: programmed start + its RX prefetch/widening
+                    // margin (77.5 us at 1M PHY, measured from the firmware's anchor updates).
+                    WriteRx((hdr&0xff)|(payload.Length<<8),payload,act.Planned+SyncOffset);
+                    fifo.Enqueue(((uint)act.Index<<24)|RxAct);
+                    var tx=new System.Text.StringBuilder();
+                    tx.AppendFormat("TX {0:x}",act.Cs);
+                    var sent=TxChain(act.Cs,true);
+                    foreach(var d in sent) tx.Append(' ').Append(d);
+                    PeerCall(tx.ToString());
+                    // TX frame interrupt: the link layer frees acknowledged (TXDONE) descriptors there.
+                    if(sent.Count>0) fifo.Enqueue(((uint)act.Index<<24)|TxAct);
+                }
+                act.Length=Math.Min(act.Length,2500);
+            } catch(Exception e) {
+                this.Log(LogLevel.Warning,"BLE peer: {0}",e.Message);
+                peer?.Dispose(); peer=null;
+            }
+        }
+        private string BdAddr(ulong cs) {
+            var bus=machine.SystemBus; var sb=new System.Text.StringBuilder();
+            for(ulong i=0;i<6;i++) sb.AppendFormat("{0:x2}",bus.ReadByte(cs+0x8+i));
+            return sb.ToString();
+        }
+        // Walk the control structure's TX descriptor list. Advertising: report the whole ring.
+        // Connection: the hardware stays on the last transmitted descriptor (TXDONE set) until
+        // software links a new one through its next pointer; send the first pending descriptor,
+        // mark it done and make it the list head.
+        private List<string> TxChain(ulong cs,bool consume) {
+            var bus=machine.SystemBus; var res=new List<string>();
+            ushort head=bus.ReadWord(cs+0x24);
+            ushort p=head;
+            for(int n=0;n<16 && (p&0x7fff)!=0;n++) {
+                ulong d=exchangeTable+(ulong)(p&0x7fff)*8;
+                ushort w0=bus.ReadWord(d);
+                if(consume && (w0&0x8000)!=0) {
+                    p=(ushort)(w0&0x7fff);
+                    if(p!=0) bus.WriteWord(cs+0x24,p);
+                    continue;
+                }
+                int hdr=bus.ReadWord(d+2), len=hdr>>8;
+                ulong data=exchangeTable+(ulong)bus.ReadWord(d+4)*2;
+                var sb=new System.Text.StringBuilder(); sb.AppendFormat("{0:x4}:",hdr);
+                int dlen=consume ? len : Math.Max(0,len-6);
+                if(bus.ReadWord(d+4)!=0) for(int i=0;i<dlen;i++) sb.AppendFormat("{0:x2}",bus.ReadByte(data+(ulong)i));
+                res.Add(sb.ToString());
+                if(consume) { bus.WriteWord(d,(ushort)(w0|0x8000)); break; }
+                p=(ushort)(w0&0x7fff);
+                if(p==head) break;
+            }
+            return res;
+        }
+        // Fill the RX descriptor the BLE core currently points at (register 0x828) and advance.
+        private void WriteRx(int header,byte[] payload,ulong when) {
+            var bus=machine.SystemBus;
+            uint cur=base.ReadDoubleWord(0x828)&0x7fff;
+            if(cur==0) return;
+            ulong d=exchangeTable+cur*8;
+            ushort w0=bus.ReadWord(d);
+            ulong data=exchangeTable+(ulong)bus.ReadWord(d+0x14)*2;
+            for(int i=0;i<payload.Length;i++) bus.WriteByte(data+(ulong)i,payload[i]);
+            bus.WriteWord(d+2,0);                       // status: no sync/CRC/length errors
+            bus.WriteWord(d+4,(ushort)header);
+            bus.WriteWord(d+6,0);                       // 1M PHY
+            bus.WriteWord(d+8,(ushort)((when/HalfSlot)&0xffff));
+            bus.WriteWord(d+0xa,(ushort)(((when/HalfSlot)>>16)&0xfff));
+            bus.WriteWord(d+0xc,(ushort)(HalfSlot-1-when%HalfSlot));
+            bus.WriteWord(d+0x10,0);                    // no resolving-list match
+            bus.WriteWord(d,(ushort)(w0|0x8000));       // RXDONE
+            base.WriteDoubleWord(0x828,(uint)(w0&0x7fff));
+        }
+        private string PeerCall(string line) {
+            if(peer==null) {
+                peer=new System.Net.Sockets.TcpClient();
+                peer.Connect("127.0.0.1",PeerPort);
+                peer.ReceiveTimeout=60000;
+                peerIn=new System.IO.StreamReader(peer.GetStream());
+                peerOut=new System.IO.StreamWriter(peer.GetStream()) { AutoFlush=true, NewLine="\n" };
+            }
+            peerOut.WriteLine(line);
+            string reply=peerIn.ReadLine() ?? throw new Exception("peer closed");
+            if(TraceEvents) this.Log(LogLevel.Info,"air> {0} | {1}",line,reply);
+            return reply.Trim();
+        }
+        private static byte[] Hex(string h) {
+            h=h.Trim(); var b=new byte[h.Length/2];
+            for(int i=0;i<b.Length;i++) b[i]=Convert.ToByte(h.Substring(2*i,2),16);
+            return b;
+        }
+        private System.Net.Sockets.TcpClient peer;
+        private System.IO.StreamReader peerIn;
+        private System.IO.StreamWriter peerOut;
+        private const int AdvFormat=4;
+        private const ulong SyncOffset=155;
         private const ulong TicksPerSecond=2000000UL;   // half-microseconds
         private const ulong HalfSlot=625;
         private const uint ClockMask=0x0fffffff;
         private const ulong LateLimit=2*HalfSlot;
         private const long IntCntl=0x18, IntStat=0x1c, IntAck=0x20, FifoStat=0x24;
-        private const uint SwInt=1u<<3, FifoInt=1u<<15, EndAct=1u<<1, SkipAct=1u<<2;
+        private const uint SwInt=1u<<3, FifoInt=1u<<15, EndAct=1u<<1, SkipAct=1u<<2, TxAct=1u<<3, RxAct=1u<<4;
         private readonly object sync=new object();
         private readonly IMachine machine;
         private readonly LimitTimer clock, alarm;
@@ -203,5 +341,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private readonly List<Activity> pending=new List<Activity>();
         private Activity running;
         private int current=-1;
+        private readonly HashSet<ulong> dumped=new HashSet<ulong>();
     }
 }
