@@ -212,7 +212,9 @@ class Central:
         for h, props, vh, uuid in self.chars:
             if len(uuid) == 32 and props & 0x30:
                 self.notify_handle = vh
-            if len(uuid) == 32 and props & 0x0c:
+            # Prefer the LOWEST-handle 128-bit write characteristic: the firmware accepts
+            # unauthenticated rnlink writes there; the higher one needs an encrypted link.
+            if len(uuid) == 32 and props & 0x0c and self.write_handle < 0:
                 self.write_handle = vh
         # Subscribe only to the rnlink notify characteristic, then start the rnlink handshake.
         self.followups = [('subscribe', vh + 1, 1 if props & 0x10 else 2)
@@ -235,18 +237,21 @@ class Central:
             self.say('rnlink resync, dropping %s' % self.rn_buf.hex()); self.rn_buf = b''
 
     def rnlink_send(self, raw):
-        # Write (write-with-response) the rnlink frame to the glasses in <=(mtu-3)-byte chunks.
+        # Write-command (0x52, no response) the rnlink frame to the glasses in <=(mtu-3)-byte chunks;
+        # 0x8005 is a write-without-response characteristic on the unauthenticated rnlink path.
         mtu = self.mtu - 3
         for i in range(0, len(raw), mtu):
-            self.send_l2cap(4, bytes([0x12]) + struct.pack('<H', self.write_handle) + raw[i:i + mtu])
+            self.send_l2cap(4, bytes([0x52]) + struct.pack('<H', self.write_handle) + raw[i:i + mtu])
 
     def gatt_next(self):
         if getattr(self, 'pending_att', False):
             return
         if self.gatt_step == 'follow':
             if not self.followups:
-                self.say('GATT client idle; waiting for notifications')
+                self.say('GATT client idle; starting rnlink handshake')
                 self.gatt_step = None
+                if self.rn:
+                    self.rn.start()
                 return
             step = self.followups.pop(0)
             if step[0] == 'read':

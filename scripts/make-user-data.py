@@ -11,8 +11,11 @@ launcher then starts on its normal home page.
 Layout (stock 1.0.4.12 AP: user_data_init, rn_flash_update, init_bond_info_from_storage):
   copy A = app_flash part 0x1c @ 0x30ff0000, copy B = part 0x1d @ 0x30fee000, 0x2000 bytes each
   +0x1cec rnlink bond record (0x84 bytes, magic at +0, then:)
-          +0x04 peer address (6 bytes)   +0x10 bond state (2 = BONDED)
-          +0x11 device type (1 = iOS)    +0x12 peer name (C string)
+          +0x04 BR/EDR address (6 bytes) +0x0a BLE address (6 bytes)
+          +0x10 bond state (2 = BONDED)  +0x11 device type (1 = iOS, 2 = Android)
+          +0x12 peer name (C string)
+  The BLE rnlink handshake compares the connecting device against the BLE address (+0x0a);
+  the classic (SPP/iAP2) reconnection uses the BR/EDR address (+0x04).
   +0x1eec / +0x1ef0 update counters (newer copy wins), +0x1ef4 layout version 0x013500c2
 """
 import struct
@@ -30,7 +33,8 @@ VERSION = 0x013500c2
 def record(name, addr, ios):
     r = bytearray(BOND_LEN)
     r[0:4] = BOND_MAGIC
-    r[4:10] = addr
+    r[4:10] = addr            # BR/EDR address
+    r[0x0a:0x10] = addr       # BLE address (same for the virtual phone)
     r[0x10] = 2
     r[0x11] = 1 if ios else 2
     n = name.encode()[:BOND_LEN - 0x13]

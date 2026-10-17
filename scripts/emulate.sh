@@ -25,7 +25,10 @@ if [ -n "${STATE:-}" ] && [ -f "$STATE/flash0.bin" ]; then
     echo "restored flash0 from $STATE" >> "$out/flash-layout.log"
 else
     # Bonded phone record (BOND=0 keeps the factory-fresh BondView start).
-    [ "${BOND:-iPhone}" = 0 ] || python3 scripts/make-user-data.py "$out/flash/flash0.bin" --name "${BOND:-iPhone}" >> "$out/flash-layout.log"
+    # BOND_ADDR=<aa:bb:..> and BOND_OS=android|ios override the seeded peer so it matches a virtual phone.
+    [ "${BOND:-iPhone}" = 0 ] || python3 scripts/make-user-data.py "$out/flash/flash0.bin" \
+        --name "${BOND:-iPhone}" ${BOND_ADDR:+--addr "$BOND_ADDR"} ${BOND_OS:+$([ "$BOND_OS" = android ] && echo --android)} \
+        >> "$out/flash-layout.log"
 fi
 # NAND resource partitions (littlefs). Optional fonts: FONTS=<dir with .ttf> (factory fonts are not in the OTA set).
 venv=${RAYNEO_VENV:-$root/.local/venv}
