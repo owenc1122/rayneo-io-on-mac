@@ -150,6 +150,10 @@ class RnlinkPhone:
         self.record_demo = bool(os.environ.get('RECORD_DEMO'))
         self.settings_demo = bool(os.environ.get('SETTINGS_DEMO'))
         self.todo_demo = bool(os.environ.get('TODO_DEMO'))
+        self.prompt_probe = bool(os.environ.get('PROMPT_PROBE'))
+        self.prompt_demo = bool(os.environ.get('PROMPT_DEMO'))
+        _lt = os.environ.get('PROMPT_LTYPE')
+        self.prompter_list_type = int(_lt) if _lt else None
         self.started = False
         self.dev_info_done = False
         self.authed = False
@@ -159,6 +163,10 @@ class RnlinkPhone:
     # ---- outbound ----
     def tx(self, business, payload, ctrl=0):
         self.send(frame(business, payload, ctrl=ctrl))
+
+    def _pctrl(self):
+        self._pctrl_n = getattr(self, '_pctrl_n', -1) + 1
+        return self._pctrl_n
 
     def start(self):
         """Kick the handshake once the GATT link is ready (called when discovery is idle)."""
@@ -203,8 +211,21 @@ class RnlinkPhone:
             self.on_aisubtitle(payload)
         elif business == 0x0d:
             self.on_assistant(payload)
+        elif business == 0x14:
+            self.on_prompter(payload)
         elif business in (0x0f, 0x0e, 0x0c, 0x18):
             self.on_feature(business, payload)
+        # Pace the prompter sequence off the glasses' continuous inbound frames: one prompter frame
+        # every few connection events, so each (large) frame is fully drained from the GATT queue and
+        # reassembled before the next is sent. A tight list->transfer->start burst overruns the glasses'
+        # rnlink reassembly and the later frames are silently dropped (only the file-list is received).
+        if getattr(self, 'prompter_step', 0):
+            self.prompter_tick = getattr(self, 'prompter_tick', 0) + 1
+            if self.prompter_tick % 6 == 0:
+                if self.prompter_step == 1:
+                    self.send_prompter_transfer(); self.prompter_step = 2
+                elif self.prompter_step == 2:
+                    self.remote_start_prompter(); self.prompter_step = 3
 
     # ---- AiSubtitle (live captions / translation), business 0x13 ----
     # PbMsg{type, message=JSON}: type 1 START_REQUEST, 2 START_REPLY, 3 END_REQUEST, 5 DISPLAY_TEXT,
@@ -369,6 +390,95 @@ class RnlinkPhone:
                                       seq=self.caption_seq, mode=2, status=1)
 
     # ---- phone-driven features ----
+    # ---- Prompter / teleprompter, business 0x14 (PROMPTER) ----
+    # PbMsg type -> glasses handler (probed): 1 handleFileListUpdate, 2 handleFileTransfer,
+    # 3 handleRemoteStart, 4 pause, 6 stop, 10 stateQuery. Schema (JsonHelper parsers):
+    #   file-list (type 1): {type, total, chunkinfo:{chunkid,total_items,islast}, items:[...]}
+    #     NB: chunkid/total_items/islast live INSIDE chunkinfo (JsonHelper::parseFileListUpdateMsg
+    #     reads them from the chunkinfo object). "type" is the updateFileList switch: 1 FullSync.
+    #     item: {did,pin,title,offset,timestamp,timezone,preview}
+    #   file-transfer (type 2): {action,did,total,...} + raw script bytes in PbMsg.data (field4).
+    #     action 1 = send data (triggers PrompterAPI::requestStartUi), 2 = cancel.
+    #   remote-start (type 3): {action,did,pageOffset,highLightOffset,total}; action 23 (0x17) = confirm.
+    # The three are paced (sent one per glasses ACK), because a back-to-back burst can overrun the
+    # glasses' rnlink reassembly under load and drop the later frames. The glasses ACKs each with a
+    # PbMsg type-1 {action,type,code,chunkid}: action 1 = list received, 2 = transfer received.
+    def on_prompter(self, payload):
+        import json
+        pb = pb_decode(payload); typ = pb.get(2)
+        raw = pb.get(3, b'')
+        try:
+            msg = json.loads(raw.decode()) if raw else {}
+        except Exception:
+            msg = {}
+        self.say('rnlink PROMPTER <- type=%s %s' % (typ, msg))
+        # The glasses replies to the transfer *request* with type 2 {action:2, total, code:1} = "ready,
+        # send me the content". Now the did is in the receiving state, so re-send the transfer carrying
+        # the actual script bytes; that write loads the content and the view scrolls it.
+        if typ == 2 and msg.get('code') == 1 and not getattr(self, 'prompter_sent_content', False):
+            self.prompter_sent_content = True
+            self.send_prompter_content()
+            return
+        # The glasses pulls the list on connect (requestFileListSync); push the full sequence once.
+        if not getattr(self, 'prompter_sent', False):
+            self.push_prompter()
+
+    def push_prompter(self, text=None, title='演示提词稿'):
+        import json, time as _t
+        if text is None:
+            text = ('欢迎使用提词器。\n'
+                    '这是一段通过蓝牙从虚拟手机推送的演示文稿。\n'
+                    '文字会自动向上滚动，方便你在演讲时朗读。\n'
+                    '现在字幕、通知、语音助手都已经可以在模拟器里使用。\n'
+                    '祝你演讲顺利！')
+        did = getattr(self, 'prompter_did', '1792240000777')
+        content = text.encode('utf-8')
+        now = int(_t.time() * 1000)
+        self.prompter_did = did
+        self.prompter_content = content
+        lst = {'type': 3, 'total': 1,
+               'chunkinfo': {'chunkid': 0, 'total_items': 1, 'islast': True},
+               'items': [{'did': did, 'pin': 0, 'title': title, 'offset': 0,
+                          'timestamp': now, 'timezone': 8, 'preview': text[:24]}]}
+        if getattr(self, 'prompter_list_type', None) is not None:
+            lst['type'] = self.prompter_list_type
+        self.say('rnlink PROMPTER -> file-list (type=%s) %s' % (lst['type'], did))
+        self.tx(0x14, pb_msg(1, message=json.dumps(lst)), ctrl=self._pctrl())
+        # Send the transfer + remote-start in the same burst: the later frames only reach the prompter
+        # dispatcher when queued together with the list (a delayed/paced send is dropped in transit).
+        self.send_prompter_transfer()
+        self.remote_start_prompter()
+        self.prompter_sent = True
+
+    def send_prompter_transfer(self):
+        import json
+        did, content = self.prompter_did, self.prompter_content
+        # type 2: file transfer, action 1 = request/send (triggers PrompterAPI::requestStartUi and
+        # launches the prompter view). Raw script bytes ride in the PbMsg data field.
+        meta = {'action': 1, 'did': did, 'total': len(content), 'chunkid': 0, 'islast': True, 'offset': 0}
+        self.say('rnlink PROMPTER -> file-transfer (action=1) %d bytes' % len(content))
+        self.tx(0x14, pb_msg(2, message=json.dumps(meta), data=content), ctrl=self._pctrl())
+
+    def send_prompter_content(self):
+        import json
+        did, content = self.prompter_did, self.prompter_content
+        # Once the glasses is ready (its type-2 {action:2,code:1} reply), deliver the script content
+        # as a data chunk; the view then renders and scrolls it.
+        meta = {'action': 1, 'did': did, 'total': len(content), 'chunkid': 0, 'islast': True,
+                'offset': 0}
+        self.say('rnlink PROMPTER -> file-content %d bytes' % len(content))
+        self.tx(0x14, pb_msg(2, message=json.dumps(meta), data=content), ctrl=self._pctrl())
+
+    def remote_start_prompter(self):
+        import json
+        did = getattr(self, 'prompter_did', '1792240000777')
+        total = len(getattr(self, 'prompter_content', b''))
+        # handleRemoteStart: "action" (bStack_38) must be 2 to enter the start logic; "code"
+        # (bStack_1c) 0x17 confirms a pending start, 0x18 cancels, else = direct preview start.
+        msg = {'action': 2, 'code': 0, 'did': did, 'pageOffset': 0, 'highLightOffset': 0, 'total': total}
+        self.say('rnlink PROMPTER -> remote-start (action=2) %s' % did)
+        self.tx(0x14, pb_msg(3, message=json.dumps(msg)), ctrl=self._pctrl())
+
     def push_todo(self, events=None):
         import json, time as _t
         # TodoLink (business 0x16) is a PbMsg: type 2 = single add/modify (single_upsert), message = JSON
@@ -443,6 +553,15 @@ class RnlinkPhone:
                     self.set_wakeup_config(headup=1, headup_degree=20, crown=1)
                 if getattr(self, 'todo_demo', False):
                     self.push_todo()
+                if getattr(self, 'prompt_demo', False):
+                    # Push a teleprompter script and remote-start it (scrolling text on screen).
+                    self.push_prompter()
+                if getattr(self, 'prompt_probe', False):
+                    # Map the prompter (business 0x14) message types: the glasses log each received
+                    # type name ("PrompterRnLinkMsgProcessor ... receive rnlink message type: N").
+                    import json as _j
+                    for t in range(1, 40):
+                        self.tx(0x14, pb_msg(t, message=_j.dumps({'probe': t})))
                 if getattr(self, 'notif_demo', False):
                     # Notification channel = business 0x15; "type" 1 = add/display (2 remove, 3 update).
                     self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',

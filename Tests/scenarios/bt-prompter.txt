@@ -1,0 +1,8 @@
+# Virtual phone pushes a teleprompter script (business 0x14) and remote-starts it; the glasses
+# should open the prompter view and scroll the pushed text. Capture after the push lands.
+emulation RunFor "35"
+gpio0 Pulse 1 false 120
+emulation RunFor "4"
+lcdc SaveFrame @OUT/shot-prompter.pgm
+emulation RunFor "4"
+lcdc SaveFrame @OUT/shot-prompter2.pgm
