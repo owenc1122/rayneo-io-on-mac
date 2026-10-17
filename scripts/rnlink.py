@@ -297,12 +297,13 @@ class RnlinkPhone:
         # Listening -> next state (rc 3) so the session moves past listening to show the answer.
         self.tx(0x0d, pb_msg(self.ASSIST_STATE, message=json.dumps({'rc': 3})))
         self.say('rnlink VOICE_ASSISTANT -> STATE_CHANGE answering')
-        # DOMAIN answer (handleDomainMessage schema): domain "intent" = general Q&A; answer/text with
-        # isFinal; sid+round tie it to the session.
+        # DOMAIN answer (handleDomainMessage schema): "answer" is a NESTED object {text, isFinal};
+        # the glasses read answer.text / answer.isFinal and render it via dispatchNlpTextAction.
+        # sid + round tie it to the session.
         sid = 'standin-sid-1'
         self.tx(0x0d, pb_msg(self.ASSIST_DOMAIN, message=json.dumps(
             {'domain': 'chat', 'intent': 'chat', 'sid': sid, 'round': 1,
-             'answer': answer, 'text': answer, 'isFinal': True})))
+             'answer': {'text': answer, 'isFinal': True}})))
         self.say('rnlink VOICE_ASSISTANT -> DOMAIN answer %r' % answer)
         self.tx(0x0d, pb_msg(self.ASSIST_NLP_DONE, message=json.dumps(
             {'sid': sid, 'text': answer, 'isFinal': True, 'final': True})))
@@ -328,11 +329,12 @@ class RnlinkPhone:
             self.tx(0x0f, pb_msg(typ or 6, message=payload_json))
         if 'current_weather_request' in text or 'current_weather' in text:
             self.push_weather()
-            # Re-push a notification periodically (new UID each time) so a banner is on-screen when
-            # a frame is captured; the glasses auto-dismiss each after ~5 s.
+            # Keep a notification banner continuously on screen: push a fresh notification (new UID,
+            # so it is not de-duplicated) every few connection events. Event-driven, NOT wall-clock,
+            # so a banner is always on screen when a frame is captured, regardless of emulator speed.
             if getattr(self, 'notif_demo', False):
                 self.notif_tick = getattr(self, 'notif_tick', 0) + 1
-                if self.notif_tick % 20 == 0:
+                if self.notif_tick % 3 == 0:
                     self.notif_uid = getattr(self, 'notif_uid', 1) + 1
                     self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',
                                            app='WhatsApp', uid=str(self.notif_uid), ntype=1)
