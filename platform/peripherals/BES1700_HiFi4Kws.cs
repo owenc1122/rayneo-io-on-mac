@@ -32,6 +32,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 for(int i = a; i <= b; i++) { t[i - a] = new double[Ncep - 1]; for(int q = 1; q < Ncep; q++) t[i - a][q - 1] = feats[i][q] - mu[q]; }
                 templates.Add(t); means.Add(mu);
             }
+            minTemplate = int.MaxValue; foreach(var t in templates) minTemplate = Math.Min(minTemplate, t.Length);
+            if(templates.Count == 0) minTemplate = 0;
             mean0 = new double[Ncep];
             foreach(var m in means) for(int q = 0; q < Ncep; q++) mean0[q] += m[q] / means.Count;
             Reset();
@@ -42,7 +44,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         public void Reset()
         {
-            mu = (double[])mean0.Clone(); floor = double.NaN; pending.Clear(); samplesSeen = 0; refractory = 0;
+            mu = (double[])mean0.Clone(); floor = double.NaN; pending.Clear(); samplesSeen = 0; refractory = 0; speechFlags.Clear();
             dist = new double[templates.Count][]; len = new double[templates.Count][];
             for(int k = 0; k < templates.Count; k++) { dist[k] = Fill(templates[k].Length, double.PositiveInfinity); len[k] = new double[templates[k].Length]; }
         }
@@ -57,17 +59,29 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 Frame(pending.ToArray(), 0, out var c, out var e);
                 pending.RemoveRange(0, Hop);
                 double score = Step(c, e);
+                speechFlags.Enqueue(e >= -14 && e > floor + 3); if(speechFlags.Count > 200) speechFlags.Dequeue();
                 if(refractory > 0) { refractory--; continue; }
-                if(score < threshold) { hit = samplesSeen; refractory = 100; ResetPaths(); }
+                // a hit needs real speech under the matched span (no matches on background noise)
+                if(score < threshold && SpeechFraction(minTemplate) >= 0.5) { hit = samplesSeen; refractory = 100; ResetPaths(); }
             }
             return hit;
         }
 
+        private double SpeechFraction(int frames)
+        {
+            int n = 0, k = 0, skip = Math.Max(0, speechFlags.Count - frames);
+            foreach(var f in speechFlags) { if(k++ < skip) continue; if(f) n++; }
+            return frames == 0 ? 0 : n / (double)Math.Min(frames, speechFlags.Count);
+        }
+
         private double Step(double[] c, double e)
         {
-            if(double.IsNaN(floor)) floor = e;
-            else floor = e > floor ? 0.999 * floor + 0.001 * e : 0.9 * floor + 0.1 * e;
-            if(e > floor + 3) for(int q = 0; q < Ncep; q++) mu[q] = 0.99 * mu[q] + 0.01 * c[q];
+            // digital silence (no input yet, or a file that ended) is no signal: nothing to adapt to
+            if(e >= -14) {
+                if(double.IsNaN(floor)) floor = e;
+                else floor = e > floor ? floor + 0.005 * (e - floor) : 0.9 * floor + 0.1 * e;   // rises over ~2 s, falls fast
+                if(e > floor + 3) for(int q = 0; q < Ncep; q++) mu[q] = 0.99 * mu[q] + 0.01 * c[q];
+            }
             var x = new double[Ncep - 1];
             for(int q = 1; q < Ncep; q++) x[q - 1] = c[q] - mu[q];
             double best = double.PositiveInfinity;
@@ -192,6 +206,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private readonly List<double> pending = new List<double>();
         private double[] mu; private double floor;
         private double[][] dist, len;
-        private long samplesSeen; private int refractory;
+        private long samplesSeen; private int refractory, minTemplate;
+        private readonly Queue<bool> speechFlags = new Queue<bool>();
     }
 }

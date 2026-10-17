@@ -70,7 +70,21 @@ sh scripts/emulate.sh /path/to/StrixOS-1.0.4.12 40 .local/runs/ble "$PWD/Tests/s
 - **声音数据**：录音流按 AP 要求的格式出帧：PCM，或用 macOS AudioToolbox 编码的 Opus（60 ms 一包）；播放流按媒体类型（mp3/aac/opus/pcm）用 AudioToolbox 解码成 DSP 混音格式 48 kHz 立体声。
 - **AP 控制台输入**：UART0 实际中断号是 55（HAL 表 `0x1829ab14` 第 4 字节），接收走 DMA + 接收超时中断；补上后场景脚本可以用 `uart WriteLine` 在 `ap>` 下敲命令。
 
-没有复现的部分：DSP 上的 Elevoc 降噪/波束成形和 KWS 唤醒词算法（Xtensa 代码，输入麦克风信号原样送出）、麦克风/扬声器的 codec 寄存器与 DMA（替身直接在 FIFO 层交换 PCM）。
+#### 语音唤醒「小雷小雷」（两级，与真机相同的链路）
+
+- **开关**：语音唤醒是手机 App 里的设置（偏好 key 0x15，出厂为关）。`VOICE_WAKE=1` 用 `scripts/set-preference.py` 把它写进 NOR 用户数据区，等同于在 App 里打开；Mac 应用的「声音」菜单里有同名开关（默认开）。`WAKE_WORD=2` 对应 App 里的英文唤醒词。
+- **第一级（原厂代码真实运行）**：AP 打开 BTH 上的 vad 流（0x18），BTH 的原厂 VAD/唤醒库 `pil_algo_vad_demo.dll` 通过 codec ADC2 → BTH DMA1 拿到 Mac 麦克风的声音。为此补了 codec（0x50300000，寄存器可读回，否则 AP 驱动在 `hal_codec_adc_chan_config` 断言）和芯片 ID（AON `0x40080000` = 0x6a4，否则 BTH 动态加载器拒绝加载该库）。原厂库判定唤醒词后发 `bth vad ready`。
+- **第二级（DSP 替身）**：AP 随后在 DSP 上打开 wakeup 流（0x1b），替身用 Notify（msgid 0xff，事件 0x11）回报结果：4 = 小雷小雷、2/3 = OK/Hey RayNeo、6 = 未确认、0 = 历史音频已送出。判定来自两个本机识别器：命令行运行用内置的模板匹配（MFCC + 动态时间规整，模板由 `scripts/make-kws-templates.sh` 用 macOS 自带中英文语音生成，可加入自己的录音）；Mac 应用另外用系统的设备端语音识别（不上传）。wakeup 流里的音频按 AP 的要求写成 8 字节头 + 240 字节恒定码率 Opus。
+- **固件自身的行为（照原样复现）**：开机时 KWS 打开请求比 mediad 就绪早约 50 ms 而失败（mediad 要等 1 秒 M55C1 的 smf 就绪，而 M55C1 镜像里根本没有 smf），之后要等一次助手交互（如双击）才重新打开；没有手机连接时固件处于离线状态，第一级命中会尝试拉起 iPhone App（与双击相同的「正在唤醒 RayNeo AI」），第二级结果按固件逻辑被忽略。
+
+#### 麦克风阵列与降噪
+
+DSP 的录音管线要 5 路（chmap 0x3d000：左、右、右 2、前、骨传导 VPU），BTH 的 codec2 要 2 或 3 路。所有通道送同一路 Mac 麦克风信号（相当于安静环境里单人说话），DSP 的 Elevoc 降噪/波束（"up" 库，Xtensa 代码）按直通处理：输出等于输入。
+
+#### 1/8 速度下的实时声音
+
+- 麦克风：所有消费者共用一条按模拟时间编号的 16 kHz 时间线。Mac 应用实时写入 `mic.raw`，积压超过 0.5 秒时替身丢弃积压里的静音，说话内容完整送达且延迟不再累积。
+- 扬声器：替身按 DSP 真实播放速度（模拟时间）从 AP 取帧，所以 AP 受到和真机一样的反压；`speaker.events` 记录每段播放的起止，Mac 应用等一段播放完整（或攒满 10 秒）后再以正常速度播出，不会断续。
 
 ## 已验证（2026-10-16，原版 1.0.4.12 固件，均有日志/截图）
 
@@ -91,7 +105,7 @@ sh scripts/emulate.sh /path/to/StrixOS-1.0.4.12 40 .local/runs/ble "$PWD/Tests/s
 ## 未完成 / 与真机仍有差异
 
 - **手机连接**：BLE 链路层已能与虚拟手机连接，但虚拟手机还不会说 rnlink 协议（帧格式 `aa55` 已见，消息未解析），所以依赖手机 App 的功能仍停在「请将眼镜连接至手机 App」。尚未建模：BR/EDR（寻呼/寻呼扫描后的 ACL、LMP，因此 SPP/RFCOMM、iAP2、A2DP、HFP 都不可用）、链路加密与 SMP 配对（AES 引擎 0xb0–0xc4、CRYPT 中断）、第二套基带 IP（0x6d060000）的空口桥、每个连接事件只收发一个 PDU。iOS 上 rnlink 依赖 iAP2（BR/EDR + MFi 认证芯片签名），模拟器无法产生该签名，真 iPhone 的 iAP2 功能不可能在纯模拟下工作。
-- **音频**：HiFi4 DSP 不执行，只实现其接口（见「音频」一节）；降噪/波束和唤醒词「小雷」算法没有复现，离线时原固件本身也会关闭语音唤醒（`MuteState ... switch to offline`）。BTH 上的常开 VAD 需要 codec2 硬件模型，尚未建模。模拟速度约为实时的 1/8：Mac 应用里原固件放出的声音是断续的，录到的语音被原固件按模拟时间读取，会越来越滞后。
+- **音频**：HiFi4 DSP 不执行，只实现其接口（见「音频」一节），DSP 上的唤醒词第二级与降噪/波束由替身完成（本机识别 / 直通），不是原厂 Xtensa 算法。A2DP 音乐与 HFP 通话的音频要等经典蓝牙（BR/EDR）建模后接入。模拟速度约为实时的 1/8，Mac 应用里的声音按整段延后播放。
 - **其他传感器**：IMU 只有静态数据（头部手势不可用），磁力计总线地址为推测，光感 W1160、佩戴检测、Wi‑Fi 未建模。
 - **速度**：约为实时的 1/8，开机到桌面约 2 分钟。主要开销在核间同步与 M55C1 的轮询，尚未优化。
 - `pixel_monospaced_latin_sub` 字体不是原厂文件（未识别出原字体）。

@@ -42,7 +42,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 regs.TryGetValue(offset, out var old);
                 regs[offset] = value;
                 if(offset == 0x700 && Running(value) != Running(old)) {
-                    nextSample = audio.MicNow();
+                    // (virtual time is read on the timer thread in Tick: reading it here, on a CPU thread
+                    // inside this lock, can deadlock against Tick waiting for the lock)
+                    restart = true;
                     pending.Clear();
                     this.Log(LogLevel.Info, "codec: ADC2 {0} ({1} channels)", Running(value) ? "started" : "stopped", Channels(value));
                 }
@@ -60,6 +62,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 if(!Running(ctl) || (glob & 1) == 0) return;
                 int ch = Channels(ctl);
                 long now = audio.MicNow();
+                if(restart) { restart = false; nextSample = now; }
                 if(now > nextSample) {
                     var mono = audio.MicSamples(nextSample, (int)(now - nextSample));
                     foreach(var s in mono) for(int k = 0; k < ch; k++) pending.Enqueue((ushort)s);
@@ -81,6 +84,6 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private readonly Dictionary<long, uint> regs = new Dictionary<long, uint>();
         private readonly Queue<ushort> pending = new Queue<ushort>();
         private long nextSample, overflow;
-        private bool announced;
+        private bool announced, restart;
     }
 }

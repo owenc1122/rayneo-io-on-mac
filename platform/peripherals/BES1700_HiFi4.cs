@@ -749,7 +749,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             if(string.IsNullOrEmpty(micPath)) return r;
             try {
                 if(micStream == null) {
-                    micStream = new FileStream(micPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    micStream = new FileStream(micPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1);   // unbuffered: the file grows
                     micDataStart = WavDataOffset(micStream);
                     srcPos = MicLive ? micStream.Length & ~1L : micDataStart;
                     this.Log(LogLevel.Info, "hifi4: microphone input {0}{1}", micPath, MicLive ? " (live)" : "");
@@ -761,14 +761,19 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     // (speech is always delivered whole); a long run of speech is cut only past 20 s.
                     long backlog = (length - srcPos) / 2;
                     if(backlog > 20 * MicRate) { srcPos = length - MicRate * 2; backlog = MicRate; }
-                    var probe = new byte[320];
-                    while(backlog > MicRate / 2 && backlog > 2 * 160) {
-                        micStream.Position = srcPos; micStream.Read(probe, 0, 320);
-                        double e = 0; for(int i = 0; i < 160; i++) { double v = BitConverter.ToInt16(probe, 2 * i); e += v * v; }
-                        double rms = Math.Sqrt(e / 160);
-                        noiseFloor = rms < noiseFloor ? 0.9 * noiseFloor + 0.1 * rms : 0.999 * noiseFloor + 0.001 * rms;
-                        if(rms > Math.Max(400, noiseFloor * 4)) break;
-                        srcPos += 320; backlog -= 160; skipped += 160;
+                    // Only long pauses (> 0.4 s) are shortened, to 0.2 s: speech keeps its natural gaps,
+                    // which the stock VAD needs.
+                    if(backlog > MicRate / 2) {
+                        var probe = new byte[320]; int quiet = 0; long scan = srcPos;
+                        while((length - scan) / 2 > MicRate / 4) {
+                            micStream.Position = scan; micStream.Read(probe, 0, 320);
+                            double e = 0; for(int i = 0; i < 160; i++) { double v = BitConverter.ToInt16(probe, 2 * i); e += v * v; }
+                            double rms = Math.Sqrt(e / 160);
+                            noiseFloor = rms < noiseFloor ? 0.9 * noiseFloor + 0.1 * rms : 0.999 * noiseFloor + 0.001 * rms;
+                            if(rms > Math.Max(400, noiseFloor * 4)) break;
+                            quiet++; scan += 320;
+                        }
+                        if(quiet > 40) { long drop = (quiet - 20) * 320L; srcPos += drop; skipped += drop / 2; }
                     }
                 }
                 var buf = new byte[n * 2];
@@ -780,6 +785,14 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     if(MicLoop && !MicLive && length > micDataStart + 2) srcPos = micDataStart; else break;
                 }
                 for(int i = 0; i < got / 2; i++) r[i] = BitConverter.ToInt16(buf, 2 * i);
+                if(MicLive) {
+                    double e = 0; for(int i = 0; i < got / 2; i++) e += (double)r[i] * r[i];
+                    bool loud = got > 0 && Math.Sqrt(e / (got / 2)) > 800;
+                    if(loud && !liveSpeech && liveLogBudget-- > 0)
+                        this.Log(LogLevel.Info, "hifi4: t={0:0.000}s live speech reaches the microphone timeline (backlog {1:0.00} s, {2:0.0} s of silence dropped so far)",
+                            ringEnd / (double)MicRate, (length - srcPos) / 2.0 / MicRate, skipped / (double)MicRate);
+                    if(loud) { liveSpeech = true; quietBlocks = 0; } else if(++quietBlocks > 100) liveSpeech = false;
+                }
                 for(int k = hostKeywords.Count - 1; k >= 0; k--) {
                     if(hostKeywords[k].Key > srcPos) continue;
                     if(hostKeywords[k].Key > srcPos - got - 32000) {
@@ -795,7 +808,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         private void Spot(short[] block, int n)
         {
+            // The AP accepts 小雷小雷 (4) in word mode 1 and OK/Hey RayNeo (2/3) in word mode 2
+            // (rayneo_audio_kws_use_eng_word_only flag 0x19d0e4c8); listen for that set only.
+            bool english = Rd8(WordModeFlag) != 0;
             foreach(var kv in LoadSpotters()) {
+                if((kv.Key == 4) == english) continue;
                 if(kv.Value.Push(block, n) < 0) continue;
                 lastKeyword = ringEnd; lastKeywordEvent = kv.Key;   // the hit ends within this block
                 this.Log(LogLevel.Info, "hifi4: t={0:0.000}s wake word {1} heard on the microphone (score {2:0.0})", ringEnd / (double)MicRate,
@@ -1034,7 +1051,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         // DSP DTCM as seen by the AP (DSP-local 0x20880000-0x208fffff).
         private const uint ApLocalWord = 0x20afffa0, ApPeerWord = 0x20afffa4;
         private const uint ChanTable = 0x20afff00, MsgList0 = 0x20afff40, MsgList1 = 0x20affe00, MsgCount = 5;
-        private const uint Rsc = 0x23c00260, IcsBlock = 0x23c1d000;
+        private const uint Rsc = 0x23c00260, IcsBlock = 0x23c1d000, WordModeFlag = 0x19d0e4c8;
         private const uint Vring0 = 0x20af0000, Vring0Num = 8, VringAlign = 8, BufSize = 0x200, VringBytes = 0xe0;
         private const uint HeapBase = 0x20a80000, HeapEnd = 0x20af0000;
         private const uint NsAddr = 53, SmfEpt = 1024;
@@ -1067,7 +1084,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private readonly short[] ring = new short[Ring];
         private readonly object micLock = new object();
         private readonly List<KeyValuePair<long, uint>> hostKeywords = new List<KeyValuePair<long, uint>>();
-        private bool hostReported;
+        private bool hostReported, liveSpeech; private int quietBlocks, liveLogBudget = 50;
         private const int MicRate = 16000, Ring = 60 * MicRate;
     }
 }
