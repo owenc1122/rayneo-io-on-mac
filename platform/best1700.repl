@@ -161,6 +161,7 @@ uart: UART.BES1700_UART @ sysbus 0x4000b000
     // lets scenarios type at the AP NSH (ap>) with `uart WriteLine "..."`.
     dma: dma
     Interrupt -> nvic@55
+    RxLine -> gpio0@18
 
 dwt: Miscellaneous.DWT @ sysbus 0xe0001000
     frequency: 240000000
@@ -235,7 +236,8 @@ btcBleExchange: Memory.MappedMemory @ sysbus 0x6d070000
 // I2C3 = 26/27, I2C4 SCL = 3), which the BTH I2C bus-recovery check samples before transfers.
 // Bit 17 = IMU INT1 (BTH board_lsm6dso32_attach: GPIO_PIN2_1, falling edge), idle high.
 gpio0: GPIOPort.BES1700_GPIO @ sysbus 0x40081000
-    pullUps: 0xcc02000a
+    // bit 18: UART0 RX (idle high)
+    pullUps: 0xcc06000a
 
 // GPIO1 also carries I2C0 pins 46/47 (bits 14/15, used by the BTH I2C1 bus recovery check): pulled up.
 gpio1: GPIOPort.BES1700_GPIO @ sysbus 0x40089000
