@@ -200,6 +200,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 SetStatus(exchangeTable+(ulong)nextAct.Index*16,2);
                 running=nextAct; running.Start=now; current=nextAct.Index;
                 if(running.Mode==2 && PeerPort!=0) AirExchange(ref running);
+                else if(running.Mode==1 && PeerPort!=0) AirExchangeClassic(ref running);
             }
             if(fifo.Count>0) raw|=FifoInt;
             return next;
@@ -282,6 +283,33 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 act.Length=Math.Min(act.Length,2500);
             } catch(Exception e) {
                 this.Log(LogLevel.Warning,"BLE peer: {0}",e.Message);
+                peer?.Dispose(); peer=null;
+            }
+        }
+        // ---- Classic BT (BR/EDR) mode-1 air bridge (WIP) -------------------------------------
+        // Classic activities share the aa55 exchange table but carry an inline control structure (cs,
+        // 0x78 B per link) in btcExchange at 0x6d02eaa8 + link*0x78. cs+0 = format (0x8045 page
+        // scan/response, 0x8044 inquiry scan), cs+8..0xd = BD_ADDR, cs+0x14 = control word (bit15 go).
+        // The real radio runs a page / page-response / FHS handshake; here we bridge it to a classic
+        // peer. First increment: hand the scan to the peer and log the firmware's classic TX so the
+        // inline RX/TX descriptor + packet format can be mapped empirically (RX injection is next).
+        private void AirExchangeClassic(ref Activity act) {
+            int fmt=EmRW(act.Cs)&0x1f;
+            try {
+                string kind = fmt==5 ? "PSCAN" : fmt==4 ? "ISCAN" : ("CL"+fmt);
+                var line=new System.Text.StringBuilder();
+                line.AppendFormat("{0} {1:x} {2}",kind,act.Cs,BdAddr(act.Cs));
+                // control word + the two pointer-ish cs fields, plus any TX chain the firmware queued.
+                line.AppendFormat(" ctl={0:x4} f14={1:x4} f18={2:x4}",EmRW(act.Cs),EmRW(act.Cs+0x14),EmRW(act.Cs+0x18));
+                var tx=TxChain(act.Cs,false);
+                foreach(var d in tx) line.Append(" tx=").Append(d);
+                string reply=PeerCall(line.ToString());
+                // "PAGE <hex>" would carry the pager's FHS/ID; RX delivery into the classic cs is the
+                // next step (needs the inline RX-descriptor + frame-status encoding).
+                if(reply.StartsWith("PAGE ") && TraceEvents)
+                    this.Log(LogLevel.Info,"classic page offered: {0}",reply.Substring(5));
+            } catch(Exception e) {
+                this.Log(LogLevel.Warning,"classic peer: {0}",e.Message);
                 peer?.Dispose(); peer=null;
             }
         }

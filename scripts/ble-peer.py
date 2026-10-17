@@ -45,6 +45,7 @@ class Central:
         self.rn_pending = []            # rnlink GATT reassembly: list of incomplete frames (glasses -> phone)
         self.rn = None                  # RnlinkPhone, attached by main()
         self.log_raw = False            # dump raw notify chunks (debug)
+        self.classic_log_n = 0          # classic-BT (BR/EDR) air bridge: cap logging
         self.glasses_addr = b''
 
     def say(self, *a):
@@ -350,6 +351,14 @@ def main():
                     hdr, data = p.split(':')
                     c.on_glasses_pdu(int(hdr, 16), bytes.fromhex(data))
                 reply = 'OK'
+            elif w[0] in ('PSCAN', 'ISCAN') or w[0].startswith('CL'):
+                # Classic BT (BR/EDR) air bridge (WIP): the glasses are page/inquiry scanning. Log the
+                # activity (cs, our BD_ADDR, control words, any queued TX) so the inline classic
+                # descriptor + packet format can be mapped. No page offered yet -> NONE.
+                if c.classic_log_n < 30:
+                    c.say('CLASSIC %s' % line.rstrip())
+                    c.classic_log_n += 1
+                reply = 'NONE'
             else:
                 reply = 'NONE'
             try:
