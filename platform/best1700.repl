@@ -194,8 +194,12 @@ btcExchange: Memory.MappedMemory @ sysbus 0x6d020000
 
 btcRadio: Miscellaneous.BES1700_BTController @ sysbus 0x6d040000
     versionWord: 0x0b000600
+    exchangeTable: 0x6d020000
+    IRQ -> btcNvic@1
 
 btcModem: Miscellaneous.BES1700_BTController @ sysbus 0x6d060000
+    exchangeTable: 0x6d070000
+    IRQ -> btcNvic@39
 
 btcCmu: Miscellaneous.BES1700_BTCClockControl @ sysbus 0x6e030000
     systemControl: sysCmu
