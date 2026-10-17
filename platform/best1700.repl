@@ -119,6 +119,11 @@ sysCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40000000
     APToCoreOneRx1 -> c1Nvic@89
     APToCoreOneTx0 -> c1Nvic@91
     APToCoreOneTx1 -> c1Nvic@92
+    // AP<->HiFi4 DSP (BES1700_HiFi4 stand-in): DSP cfg rx 0x4c,0x4d / tx 0x4f,0x50
+    DspToAPRx0 -> nvic@76
+    DspToAPRx1 -> nvic@77
+    DspToAPTx0 -> nvic@79
+    DspToAPTx1 -> nvic@80
     CoreOneBTReceive0 -> c1Nvic@104
     CoreOneBTReceive1 -> c1Nvic@105
     CoreOneBTReceive2 -> c1Nvic@43
@@ -128,6 +133,10 @@ sysCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40000000
     CoreOneBTTransmit2 -> c1Nvic@29
     CoreOneBTTransmit3 -> c1Nvic@30
     coreOneCpu: c1
+
+// HiFi4 audio DSP stand-in (see BES1700_HiFi4.cs). The window only exposes debug counters.
+hifi4: Miscellaneous.BES1700_HiFi4 @ sysbus 0x4fff0000
+    mailbox: sysCmu
 
 ispi: SPI.BES1700_ISPI @ sysbus 0x4000a000
 
@@ -142,6 +151,10 @@ dma: DMA.BES1700_DMA @ sysbus 0x401a0000
     IRQ -> nvic@37
 
 uart: UART.BES1700_UART @ sysbus 0x4000b000
+    // hal_uart table 0x1829ab14: {base 0x4000b000, NVIC irq byte +4 = 0x37}. RX (DMA + receive timeout)
+    // lets scenarios type at the AP NSH (ap>) with `uart WriteLine "..."`.
+    dma: dma
+    Interrupt -> nvic@55
 
 dwt: Miscellaneous.DWT @ sysbus 0xe0001000
     frequency: 240000000
@@ -194,8 +207,12 @@ btcExchange: Memory.MappedMemory @ sysbus 0x6d020000
 
 btcRadio: Miscellaneous.BES1700_BTController @ sysbus 0x6d040000
     versionWord: 0x0b000600
+    exchangeTable: 0x6d020000
+    IRQ -> btcNvic@1
 
 btcModem: Miscellaneous.BES1700_BTController @ sysbus 0x6d060000
+    exchangeTable: 0x6d070000
+    IRQ -> btcNvic@39
 
 btcCmu: Miscellaneous.BES1700_BTCClockControl @ sysbus 0x6e030000
     systemControl: sysCmu
@@ -208,18 +225,22 @@ btcBleExchange: Memory.MappedMemory @ sysbus 0x6d070000
     size: 0x4000
 
 // Crown key P0_1 (active low, pull-up); see .local/research/parallel/input.md.
+// Pull-ups: P0_1 crown key; I2C pins idle high (iomux tables at 0x20100e6b..: I2C1 = pins 30/31,
+// I2C3 = 26/27, I2C4 SCL = 3), which the BTH I2C bus-recovery check samples before transfers.
 gpio0: GPIOPort.BES1700_GPIO @ sysbus 0x40081000
-    pullUps: 0x2
+    pullUps: 0xcc00000a
 
+// GPIO1 also carries I2C0 pins 46/47 (bits 14/15, used by the BTH I2C1 bus recovery check): pulled up.
 gpio1: GPIOPort.BES1700_GPIO @ sysbus 0x40089000
     panelSPI: true
+    pullUps: 0xc000
 
 // GPIO2 (pin 64+n): bit14 = OTS (crown rotation) motion interrupt, active low;
 // bit20 = VBUS detect (cb_vbus_detect_venus pin 0x54, LOW = cable in), idles high = unplugged;
-// bits22/23 = MAX17335 left/right ALRT (pins 0x56/0x57), active low.
+// bits22/23 = MAX17335 left/right ALRT (pins 0x56/0x57), active low; bits 8/9 = I2C2 pins 72/73 idle high.
 // Plug the charger from the monitor: `gpio2 SetInput 20 false`.
 gpio2: GPIOPort.BES1700_GPIO @ sysbus 0x4008a000
-    pullUps: 0xd04000
+    pullUps: 0xd04300
 
 // PSC: GPIO interrupt aggregation (hal_psc_gpio_irq_*), NVIC line 2.
 psc: Miscellaneous.BES1700_PSC @ sysbus 0x40085000
@@ -250,6 +271,9 @@ gpu: Video.BES1700_GPU @ sysbus 0x401f0000
     // gpu_hal_init: nuttx_irq_attach(0x21)
     IRQ -> nvic@33
 
+// Ambient light sensor (w1160_driver_uorb_init, address 0x48, ID 0xE6), see BES1700_W1160.cs.
+light: Sensors.BES1700_W1160 @ i2c1 0x48
+
 led: Miscellaneous.BES1700_I2CRegisters @ i2c1 0x30
     idAddress: 0
     idValue: 0x40
@@ -279,13 +303,13 @@ bthCmu: Miscellaneous.BES1700_BTHClockControl @ sysbus 0x50000000
 // BTH-side buses. Bases and IRQs from the BTH image's driver tables:
 // I2C {0x50006000 irq 76, 0x50007000 irq 77, 0x50008000 irq 78} at 0x0c0f07d0,
 // DMA {0x50170000 irq 30, 0x50130000 irq 29} at 0x0c0f041c.
-bthI2c0: I2C.DesignWare_APB_I2C @ sysbus 0x50006000
+bthI2c0: I2C.BES1700_I2C @ sysbus 0x50006000
     IRQ -> bthNvic@76
 
-bthI2c1: I2C.DesignWare_APB_I2C @ sysbus 0x50007000
+bthI2c1: I2C.BES1700_I2C @ sysbus 0x50007000
     IRQ -> bthNvic@77
 
-bthI2c2: I2C.DesignWare_APB_I2C @ sysbus 0x50008000
+bthI2c2: I2C.BES1700_I2C @ sysbus 0x50008000
     IRQ -> bthNvic@78
 
 bthDma0: DMA.BES1700_DMA @ sysbus 0x50170000
@@ -298,8 +322,12 @@ bthDma1: DMA.BES1700_DMA @ sysbus 0x50130000
 // model stands in for the LSM6DSO32; the I2C address is an assumption.
 bthImu: Sensors.LSM6DSO_IMU @ bthI2c1 0x6a
 
-// Magnetometer (mmc5603nj_init on the BTH, product ID 0x10). Bus 2 / 0x30 is an assumption.
-bthMag: Sensors.BES1700_MMC5603NJ @ bthI2c2 0x30
+// Host head pose -> IMU (not hardware; unused window). See BES1700_HeadMotion.cs.
+headMotion: Miscellaneous.BES1700_HeadMotion @ sysbus 0x7ff00000
+    imu: bthImu
+
+// Magnetometer (mmc5603nj_init on the BTH, product ID 0x10): BTH I2C port 1 (dev+0x1c), address 0x30, same bus as the IMU.
+bthMag: Sensors.BES1700_MMC5603NJ @ bthI2c1 0x30
 
 // Second M55 core of the AP subsystem ("M55C1", nuttx_apc1.bin: CHIP_ROLE=CP), runs the
 // bluetoothd RPC server. Started by cp_subsys_open via AON +0xb4/+0x1a4.

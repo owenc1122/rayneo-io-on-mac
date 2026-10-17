@@ -20,6 +20,14 @@ sh scripts/build-app.sh                 # BUNDLE_RENODE=1 时把 Renode 一起�
 sh scripts/run-app.sh                   # 等同于 Finder 双击
 ```
 
+虚拟手机（BLE）：
+
+```sh
+python3 scripts/ble-peer.py --port 23600 --log peer.log &
+sh scripts/emulate.sh /path/to/StrixOS-1.0.4.12 40 .local/runs/ble "$PWD/Tests/scenarios/ble-peer.resc"
+```
+声音（见下文「音频」）：命令行运行时，原固件播放的声音写到输出目录的 `speaker.raw`（48 kHz 立体声 s16le），`MIC=<wav>` 指定录音输入；`python3 scripts/check-audio.py <输出目录> [mic.wav]` 把两者转成 WAV 并给出电平和相关性。Mac 应用直接用 Mac 的麦克风和扬声器（首次会请求麦克风权限）。
+
 应用首次启动会弹窗让你选择固件文件夹，可在「固件」菜单里重新选择或指定字体文件夹。键盘：空格单击、D 双击、L 长按、↑/↓ 或滚轮旋转表冠。生成的闪存/NAND 镜像和日志放在 `~/Library/Application Support/RayNeo io on Mac/runs/`。
 
 ## 原理概要
@@ -31,6 +39,7 @@ sh scripts/run-app.sh                   # 等同于 Finder 双击
 | 板级描述 | `platform/best1700.repl` | AP（M55C0）、M55C1、BTH（M33）、BTC（M4）四个核 |
 | 外设模型 | `platform/peripherals/*.cs` | 由固件访问推断，未做实机校准 |
 | 运行脚本 | `scripts/emulate.sh`、`scripts/make-resc.py` | 生成镜像、Renode 脚本，挂载固件日志钩子 |
+| 音频 DSP 替身 | `platform/peripherals/BES1700_HiFi4.cs` | 代替 HiFi4 DSP 完成核间协议和音频收发，见下节 |
 
 ### BTH 启动问题（已解决）
 
@@ -51,6 +60,18 @@ sh scripts/run-app.sh                   # 等同于 Finder 双击
 - BTH 侧 CMU、I2C、DMA、IMU（Renode 自带 LSM6DSO 模型替代 LSM6DSO32）。
 - GPU（VGLite 命令缓冲执行）、LCDC 双眼 G4 扫描输出、GPIO/PSC 中断、OTS 光学旋钮：取自 `.local/research/parallel/` 的并行研究草稿并接入正式配置。
 
+### 音频（HiFi4 DSP）
+
+升级包里的 `nuttx_audio.bin` 是 Cadence HiFi4 DSP 的程序（FreeRTOS/XCC，大量 FLIX 指令包）。smf.json 显示录音（5 路麦克风 16 kHz + Elevoc 降噪/波束 "up" 算法 + Opus 编码）、唤醒词（"wakeup" KWS 算法）、解码混音和扬声器 DMA 都在这颗 DSP（smf cpuid 4）上，AP 只负责共享内存队列两端。Renode 只有 Xtensa sample_controller 核：把镜像装到 `0x1BC00000`、PC 设为复位向量 `0x1BC00460`，第 14 条指令（`0x1BC004E3`）就报 "unrecognized opcode"，而且 KWS/up 算法 DLL 同样是 Xtensa 代码。所以不运行 DSP，改为在模拟器里实现 **DSP 对 AP 的接口契约**（偏移均来自 AP 镜像，研究记录在 `.local/research/audio/`）：
+
+- **邮箱**：与 AP↔M55C1 共用 sys CMU `+0x90/+0x94`，DSP 链路占 bit0–10（AP 中断 76/77 收、79/80 发完成）；rmt_ipc 通道表通过 `0x20afffa0/0x20afffa4` 交换。
+- **rptun/rpmsg**：远端填写 audio 资源表（`0x23c00260`）的 vring0，等 AP 写 DRIVER_OK，然后用标准 virtio 环收发；DSP 端点 `smf_m55c0_hifi4`（DSP 镜像里的同名端点）通过 NS 公告，AP 绑定后发来 ICS 块地址（`0x23c1d000`），替身置 DSP 就绪位。
+- **smf**：应答流的 Add/Remove/Set/Get，按名字分配共享内存 FIFO（池消息 0x20/0x22，魔数 `0x55AA5A5A`），在 FIFO 里写/读帧和媒体描述。
+- **声音数据**：录音流按 AP 要求的格式出帧：PCM，或用 macOS AudioToolbox 编码的 Opus（60 ms 一包）；播放流按媒体类型（mp3/aac/opus/pcm）用 AudioToolbox 解码成 DSP 混音格式 48 kHz 立体声。
+- **AP 控制台输入**：UART0 实际中断号是 55（HAL 表 `0x1829ab14` 第 4 字节），接收走 DMA + 接收超时中断；补上后场景脚本可以用 `uart WriteLine` 在 `ap>` 下敲命令。
+
+没有复现的部分：DSP 上的 Elevoc 降噪/波束成形和 KWS 唤醒词算法（Xtensa 代码，输入麦克风信号原样送出）、麦克风/扬声器的 codec 寄存器与 DMA（替身直接在 FIFO 层交换 PCM）。
+
 ## 已验证（2026-10-16，原版 1.0.4.12 固件，均有日志/截图）
 
 - 四个核（AP、M55C1、BTH、BTC）全部启动；约 12 秒模拟时间进入原厂桌面（`BoardView::show`），整次运行无断言。
@@ -61,14 +82,18 @@ sh scripts/run-app.sh                   # 等同于 Finder 双击
 - **表冠**：单击进应用列表、再单击打开应用、长按/双击唤醒 RayNeo AI、旋转在应用列表里切换（录音→实时字幕→实时提示），全部由原固件处理（`tests/scenarios/crown.txt`、`rotate.txt`）。
 - **硬件定时器**：SP804 双定时器（0x40083000/0x40002000）补上后，按键去抖等软件定时器正常；I2C 改用自建 DesignWare 模型，不再出现读超时。
 - **蓝牙控制器**：BTC 原固件通过基带版本/软复位检查，响应主机 HCI 命令（Reset、读版本/地址、设置名称、事件掩码等），BLE 广播能开启。
+- **蓝牙基带**（`BES1700_BTController`）：两套 RW-IP 公共块（0x6d040000→BTC IRQ 1、0x6d060000→IRQ 39）的定时目标 1–3、软件中断、交换表活动调度（ACTSCHCNTL 0x110、ET 状态、活动 FIFO 结束/跳过）。BLE 广播按间隔真实运行（开启状态 0，之前为 2）；主机按绑定记录回连 iPhone 时控制器真实返回寻呼超时（status 4），iOS SPP 重试 3 次，C1 不再出现 `bes_hci_send_data osEventTimeout` 断言（60 秒运行，`Tests/scenarios/bt-reconnect.txt`）。
+- **虚拟手机（BLE 链路层）**：`scripts/ble-peer.py` 作为中心设备，通过基带模型的空口桥（`btcRadio PeerPort`，交换内存 RX/TX 描述符 + 活动 FIFO 收发帧中断）连接原固件：CONNECT_IND 被接受，主机报告 LE ACL/GATT 已连接，LL 版本/特性/长度过程完成，ATT MTU 247，发现 GATT 数据库（GAP、GATT、RayNeo 服务 0xB81D：通知特征 `7db3e235…`、写特征 `ea8b70d5…`/`ea8b60c5…`），订阅后眼镜通过 0x8002 主动发出 rnlink 帧（`aa55…`）。
+- **录音（麦克风 → 原固件）**：主页双击表冠（画面「正在唤醒 RayNeo AI」），原固件的 `AudioAdapter::startMfiWakeupPreroll` 打开语音预录（smf 流 arec2，要求 Opus 32 kbps / 60 ms）；替身把 `MIC` 指定的 WAV 编码成 Opus 送入共享内存队列，AP 日志出现 `rayneo-record-sock:record-start-success` 并持续读帧、无溢出。`scripts/check-audio.py` 把 AP 收到的 91 个 Opus 包解码回 WAV，与输入的相关系数 0.97（`tests/scenarios/record.txt`）。
+- **播放（原固件 → 扬声器）**：无手机时原固件的本地提示音是空实现（`rayneo_audio_local_music_play` 只打日志），播放来自手机 TTS/音乐/通话。离线可用的原厂路径是 AP 控制台的 `mediatool` 工厂扬声器测试：`fspeakerstart 2` 播放固件内嵌的 MP3（`buff://0x182a5a6a_11472.mp3`），经 AP 解复用 → aplay1 共享内存队列 → 替身解码，`speaker.raw` 得到 2.5 秒满幅 1 kHz 正弦（`tests/scenarios/speaker.txt`）。
 - **Mac 应用**：窗口显示原固件画面，空格按住=按表冠、滚轮/方向键=旋转；退出时保存 NOR+NAND，下次启动恢复（设置、配对、文件保留）；「恢复出厂设置」清除。固件选择后复制到应用数据目录，避免访问「文稿」触发系统授权弹窗。
 
 ## 未完成 / 与真机仍有差异
 
-- **手机连接**：BTC 基带没有射频和基带定时中断模型，无法与任何手机真正连接；依赖手机 App 的功能（录音、字幕、提示、导航、AI 对话等）会停在「请将眼镜连接至手机 App」。
-- **音频**：HiFi4 音频 DSP、麦克风、扬声器未建模，没有声音输入输出。
-- **其他传感器**：IMU 只有静态数据（头部手势不可用），磁力计总线地址为推测，光感 W1160、佩戴检测、Wi‑Fi 未建模。
-- **速度**：约为实时的 1/8，开机到桌面约 2 分钟。主要开销在核间同步与 M55C1 的轮询，尚未优化。
+- **手机连接**：BLE 链路层已能与虚拟手机连接，但虚拟手机还不会说 rnlink 协议（帧格式 `aa55` 已见，消息未解析），所以依赖手机 App 的功能仍停在「请将眼镜连接至手机 App」。尚未建模：BR/EDR（寻呼/寻呼扫描后的 ACL、LMP，因此 SPP/RFCOMM、iAP2、A2DP、HFP 都不可用）、链路加密与 SMP 配对（AES 引擎 0xb0–0xc4、CRYPT 中断）、第二套基带 IP（0x6d060000）的空口桥、每个连接事件只收发一个 PDU。iOS 上 rnlink 依赖 iAP2（BR/EDR + MFi 认证芯片签名），模拟器无法产生该签名，真 iPhone 的 iAP2 功能不可能在纯模拟下工作。
+- **音频**：HiFi4 DSP 不执行，只实现其接口（见「音频」一节）；降噪/波束和唤醒词「小雷」算法没有复现，离线时原固件本身也会关闭语音唤醒（`MuteState ... switch to offline`）。BTH 上的常开 VAD 需要 codec2 硬件模型，尚未建模。模拟速度约为实时的 1/8：Mac 应用里原固件放出的声音是断续的，录到的语音被原固件按模拟时间读取，会越来越滞后。
+- **其他传感器**：光感 W1160（I2C1 0x48，固件读到 250 lux）、磁力计 MMC5603NJ（BTH I2C1 0x30，ID 0x10）已被原固件识别；IMU 已激活，`headMotion`（Pose/Nod/Shake/Turn）可按模拟时间驱动它，但头部手势在原固件里的效果尚未验证。BTH I2C1 的 DMA 模式未建模（固件两次超时后自动改用 FIFO，开机多约 1 秒）。佩戴检测、Wi‑Fi 未建模。
+- **速度**：约为实时的 1/8，开机到桌面约 2 分钟。四个核改为串行执行（`SetGlobalSerialExecution`）后不再出现模型锁死锁，速度与并行相当。
 - `pixel_monospaced_latin_sub` 字体不是原厂文件（未识别出原字体）。
 
 ## 研究工具

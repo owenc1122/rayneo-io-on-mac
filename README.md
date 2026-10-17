@@ -37,7 +37,7 @@ Developing for smart glasses usually means flashing a real device for every chan
 
 ## Status
 
-The unmodified stock firmware now **boots to its real home screen and responds to the crown**. It is still not a complete device: there is no phone link and no audio yet.
+The unmodified stock firmware **boots to its real home screen, responds to the crown, plays and records audio, and links to a virtual BLE phone**. It is still not a complete device: phone-app features, classic Bluetooth and head gestures are not done yet.
 
 <p align="center">
   <img src="docs/media/boot-progress.svg" alt="Boot progress: all four cores start, the stock launcher reaches its home screen, crown input works; phone link, audio and head motion are not done yet" width="100%">
@@ -52,10 +52,11 @@ The unmodified stock firmware now **boots to its real home screen and responds t
 | Crown | Working | Press, double press, long press and rotation are handled by the firmware itself (`Tests/scenarios/`) |
 | Timers, I2C, GPU, display | Working | SP804 hwtimers, a DesignWare I2C model, VGLite command execution, two-eye scan-out |
 | Persistence | Working | The app saves NOR and NAND on quit and restores them, so settings and pairing survive; "Factory reset" clears them |
-| Bluetooth controller | Partial | Stock BTC firmware answers host HCI and starts advertising; no baseband timing or radio, so no phone can connect |
-| Audio (HiFi4 DSP, mic, speaker) | Not started | |
-| Head motion, light sensor, Wi-Fi | Not started | IMU returns static data |
-| Speed | Slow | About 1/8 of real time; boot to home takes about 2 minutes |
+| Bluetooth (BLE) | Partial | Baseband timing model: advertising, page timeouts and reconnect retries run like hardware. A virtual phone (`scripts/ble-peer.py`) connects over the link layer, discovers GATT and receives rnlink frames; the phone side of rnlink is not implemented yet, so phone features still wait for the app |
+| Bluetooth classic (SPP, iAP2, A2DP, HFP) | Not started | iAP2 on a real iPhone also needs the MFi authentication chip, which an emulator cannot sign |
+| Audio | Partial | The HiFi4 DSP is not executed; its AP-facing contract (mailbox, rpmsg, smf streams) is implemented. Recording delivers Mac or file audio to the firmware as Opus; playback is decoded to the Mac speaker. Wake word and noise suppression are not reproduced |
+| Sensors | Partial | Ambient light (W1160) and magnetometer (MMC5603NJ) are detected; the IMU is active and can be driven from the host (`headMotion`), but head gestures are not verified yet; wear sensor and Wi-Fi are not modelled |
+| Speed | Slow | About 1/8 of real time; boot to home takes about 2 minutes. Cores run serially in one emulation thread |
 | Calibration | Unverified | Several register, ID and clock values are inferred from firmware, not measured on hardware |
 
 The detailed engineering log lives in [`docs/DEV-NOTES.md`](docs/DEV-NOTES.md).
@@ -105,8 +106,11 @@ No vendor firmware, OTA package, fonts, or images and assets extracted from them
 - [x] Crown press and rotation from the Mac keyboard and trackpad
 - [x] Clock, battery gauges, hardware timers, I2C
 - [x] Glasses state saved between app sessions
-- [ ] Bluetooth baseband timing and a phone link (virtual peer or a real phone through the Mac)
-- [ ] Audio: HiFi4 DSP, microphone and speaker through the Mac
+- [x] Bluetooth baseband timing; virtual BLE phone connects
+- [ ] Phone side of rnlink: notifications, navigation, captions, AI and the other phone features
+- [ ] Classic Bluetooth: SPP, A2DP, HFP
+- [x] Audio in and out through the DSP contract
+- [ ] Wake word and noise suppression
 - [ ] Head motion from the Mac, light and wear sensors
 - [ ] Real-time speed
 - [ ] Signed, notarized app bundle
@@ -138,7 +142,7 @@ Original code is released under the [MIT License](LICENSE). Renode is MIT licens
 
 ### 当前进度（如实说明）
 
-**原版固件已能进入真实桌面，并响应表冠操作；但还不是完整的眼镜：没有手机连接，也没有声音。**
+**原版固件已能进入真实桌面、响应表冠、录音和放音，并能和虚拟 BLE 手机建立连接；但还不是完整的眼镜：依赖手机 App 的功能、经典蓝牙和头部手势还没做好。**
 
 | 部分 | 状态 | 说明 |
 |---|---|---|
@@ -149,10 +153,11 @@ Original code is released under the [MIT License](LICENSE). Renode is MIT licens
 | 表冠 | 可用 | 单击、双击、长按、旋转都由固件自己处理（`Tests/scenarios/`） |
 | 定时器、I2C、GPU、显示 | 可用 | SP804 硬件定时器、DesignWare I2C、VGLite 绘制、双眼扫描输出 |
 | 状态保存 | 可用 | 应用退出时保存 NOR 和 NAND，下次恢复；「恢复出厂设置」清除 |
-| 蓝牙控制器 | 部分 | 原厂 BTC 固件能应答主机 HCI 并开始广播；没有基带时序和射频，手机还连不上 |
-| 音频（HiFi4 DSP、麦克风、扬声器） | 未开始 | |
-| 头部动作、光感、Wi‑Fi | 未开始 | IMU 只有静态数据 |
-| 速度 | 慢 | 约为实时的 1/8，开机到桌面约 2 分钟 |
+| 蓝牙（BLE） | 部分 | 基带时序模型：广播、寻呼超时、回连重试按硬件节奏运行。虚拟手机（`scripts/ble-peer.py`）能在链路层连上、发现 GATT 并收到 rnlink 帧；手机端 rnlink 协议还没实现，依赖手机的功能仍在等待 App |
+| 经典蓝牙（SPP、iAP2、A2DP、HFP） | 未开始 | 真 iPhone 的 iAP2 还需要 MFi 认证芯片签名，模拟器无法产生 |
+| 音频 | 部分 | 不执行 HiFi4 DSP，而是实现它对 AP 的接口（邮箱、rpmsg、smf 流）。录音把 Mac 或文件的声音以 Opus 送入固件，播放解码到 Mac 扬声器；唤醒词与降噪未复现 |
+| 传感器 | 部分 | 光感（W1160）、磁力计（MMC5603NJ）已被识别；IMU 已激活、可由主机驱动（`headMotion`），头部手势尚未验证；佩戴检测、Wi‑Fi 未建模 |
+| 速度 | 慢 | 约为实时的 1/8，开机到桌面约 2 分钟；四个核在同一模拟线程中串行执行 |
 | 校准 | 未验证 | 多处寄存器、ID、时钟值从固件推断，未经实机测量 |
 
 详细开发记录见 [`docs/DEV-NOTES.md`](docs/DEV-NOTES.md)。

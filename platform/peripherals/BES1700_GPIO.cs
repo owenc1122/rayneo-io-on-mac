@@ -37,7 +37,7 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
                 case 0x3c: return polarity;
                 case 0x40: return Pending;
                 case 0x44: return raw;
-                case 0x50: return panelSPI ? (output & ~Miso) | (miso ? Miso : 0) : Level();
+                case 0x50: return panelSPI ? ((output & ~Miso) | (miso ? Miso : 0)) & PanelPins | (Level() & ~PanelPins) : Level();
                 default: return 0;
             }
         }
@@ -129,6 +129,7 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
         private byte ReadPanelRegister(byte register) { return (byte)(((output&Cs)==0?registers[register]:255) & ((output&RightCs)==0?rightRegisters[register]:255)); }
         private const uint RightCs=1u<<23, ChipSelects=(1u<<16)|(1u<<23);
         private const uint Cs=1u<<16,Clock=1u<<17,Mosi=1u<<18,Miso=1u<<19;
+        private const uint PanelPins=ChipSelects|Clock|Mosi|Miso;
         private readonly IMachine machine;
         private readonly bool panelSPI;
         private readonly byte panelId;

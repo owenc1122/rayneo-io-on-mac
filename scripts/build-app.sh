@@ -32,6 +32,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleVersion</key><string>2</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSMicrophoneUsageDescription</key><string>把 Mac 麦克风的声音交给模拟眼镜的原固件（录音、语音助手）。声音只在本机处理。</string>
 </dict></plist>
 PLIST
 codesign --force --deep --sign - "$app"

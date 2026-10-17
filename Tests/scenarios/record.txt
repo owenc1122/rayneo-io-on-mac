@@ -1,0 +1,8 @@
+# Double-click on the home page: AudioAdapter::startMfiWakeupPreroll opens the recorder (smf stream arec2 on
+# the HiFi4). With MIC=<wav> the frames the AP reads come from that file. Captures shot-*.pgm next to boot.log.
+lcdc SaveFrame @OUT/shot-0-home.pgm
+gpio0 Pulse 1 false 120
+emulation RunFor "0.15"
+gpio0 Pulse 1 false 120
+emulation RunFor "6"
+lcdc SaveFrame @OUT/shot-1-record.pgm
