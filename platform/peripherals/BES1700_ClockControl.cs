@@ -32,6 +32,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             if(offset == (alwaysOn ? 0x50 : 0x288)) return (uint)counter.Value;
             if(!alwaysOn && (offset==0xec || offset==0x224 || offset==0x1f4)) return ReadHostIPC(offset);
             if(!alwaysOn && offset==0x90) lock(ipcLock) return ReadCoreOneIPC();
+            // LPU control (+0x8c): hal_cmu_sys_lpu_init writes 0x20/0x60, and hal_cmu_lpu_busy
+            // (AP and M55C1) treats (value & 0xa0) == 0x20 as busy, i.e. bit 7 is the unit's ready
+            // status. Without it the AP's hal_sleep_proc never reaches WFI and spins at full speed.
+            if(!alwaysOn && offset==0x8c) return (registers.TryGetValue(offset, out var lpu) ? lpu : 0) | 0x80;
             long firstLock = alwaysOn ? 0x100 : 0xc0;
             int lockCount = alwaysOn ? 16 : 8;
             if(offset >= firstLock && offset < firstLock + lockCount*4) {
@@ -205,6 +209,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             }
             for(int i=0;i<2;i++) { c2aRx[i].Set(levels[16+i]); c2aTx[i].Set(levels[18+i]); a2cRx[i].Set(levels[20+i]); a2cTx[i].Set(levels[22+i]); }
             uint dsp; lock(ipcLock) dsp=coreOneMailbox;
+            c2aRx[2].Set((dsp&(1u<<23))!=0);
             for(int i=0;i<2;i++) { d2aRx[i].Set((dsp&(1u<<(9+i)))!=0); d2aTx[i].Set((dsp&(1u<<(6+i)))!=0); }
         }
         public GPIO LaneARx0=>laneARx[0]; public GPIO LaneARx1=>laneARx[1]; public GPIO LaneARx2=>laneARx[2]; public GPIO LaneARx3=>laneARx[3];
@@ -234,10 +239,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         public void DspSet(uint bits) { lock(ipcLock) coreOneMailbox|=bits&0x7ffu; UpdateIPC(); }
         public void DspClear(uint bits) { lock(ipcLock) coreOneMailbox&=~(bits&0x7ffu); UpdateIPC(); }
         public GPIO CoreOneToAPRx0=>c2aRx[0]; public GPIO CoreOneToAPRx1=>c2aRx[1];
+        // Channel 2 (bit 23) is the M55C1 sleep signal: hal_cmu_lpu_sleep_cp sets it before its deep WFI
+        // and waits for the AP's m55c1_sleep_handler (IRQ 90) to clear it.
+        public GPIO CoreOneSleepToAP=>c2aRx[2];
         public GPIO CoreOneToAPTx0=>c2aTx[0]; public GPIO CoreOneToAPTx1=>c2aTx[1];
         public GPIO APToCoreOneRx0=>a2cRx[0]; public GPIO APToCoreOneRx1=>a2cRx[1];
         public GPIO APToCoreOneTx0=>a2cTx[0]; public GPIO APToCoreOneTx1=>a2cTx[1];
-        private readonly GPIO[] c2aRx=Lines(2), c2aTx=Lines(2), a2cRx=Lines(2), a2cTx=Lines(2);
+        private readonly GPIO[] c2aRx=Lines(3), c2aTx=Lines(2), a2cRx=Lines(2), a2cTx=Lines(2);
         private uint coreOneMailbox;
         private uint ReadCoreOneIPC() { return coreOneMailbox; }
         private void WriteCoreOneIPC(long offset,uint value) {

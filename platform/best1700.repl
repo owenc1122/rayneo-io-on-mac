@@ -113,6 +113,7 @@ sysCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40000000
     // AP<->M55C1: both cfgs list rx 0x58,0x59 / tx 0x5b,0x5c
     CoreOneToAPRx0 -> nvic@88
     CoreOneToAPRx1 -> nvic@89
+    CoreOneSleepToAP -> nvic@90
     CoreOneToAPTx0 -> nvic@91
     CoreOneToAPTx1 -> nvic@92
     APToCoreOneRx0 -> c1Nvic@88
@@ -343,3 +344,9 @@ c1: CPU.CortexM @ sysbus
 c1Nvic: IRQControllers.BES1700_PPBExemptNVIC @ sysbus new Bus.BusPointRegistration { address: 0xe000e000; cpu: c1 }
     systickFrequency: 16384
     IRQ -> c1@0
+
+// M55C1 HAL hwtimer block (hal_timer bases table of nuttx_apc1: 0x40084000). Sub-timer 1 is its
+// sleep wakeup timer (hal_cmu_lpu_sleep_cp programs it before the deep WFI; stop clears ICER1 bit 29).
+hwTimer2: Timers.BES1700_SP804 @ sysbus 0x40084000
+    frequency: 16384
+    IRQ1 -> c1Nvic@61
