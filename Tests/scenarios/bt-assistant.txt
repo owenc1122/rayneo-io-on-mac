@@ -1,0 +1,14 @@
+# Virtual phone connected; wake, double-click the crown to open the AI assistant (WAKEUP on 0x0d);
+# the phone drives the session (STATE_CHANGE -> listening) and answers with a stand-in ASR + NLP answer.
+emulation RunFor "30"
+gpio0 Pulse 1 false 120
+emulation RunFor "3"
+gpio0 Pulse 1 false 120
+emulation RunFor "0.2"
+gpio0 Pulse 1 false 120
+emulation RunFor "4"
+lcdc SaveFrame @OUT/shot-ai-1.pgm
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-ai-2.pgm
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-ai-3.pgm

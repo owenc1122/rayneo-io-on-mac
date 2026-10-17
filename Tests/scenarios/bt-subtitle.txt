@@ -1,14 +1,16 @@
-# Open the live-subtitle app and verify the phone-pushed caption shows. Nav: wake, app-list, rotate, open.
-emulation RunFor "34"
+# Map the app list and open the live-subtitle (CC) app, capturing each step.
+emulation RunFor "30"
 gpio0 Pulse 1 false 120
-emulation RunFor "1.5"
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-a-wake.pgm
 gpio0 Pulse 1 false 120
-emulation RunFor "1.5"
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-b-list.pgm
 i2c0.ots Rotate 400
-emulation RunFor "1.5"
-lcdc SaveFrame @OUT/shot-list.pgm
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-c-cc.pgm
 gpio0 Pulse 1 false 120
 emulation RunFor "5"
-lcdc SaveFrame @OUT/shot-sub.pgm
-emulation RunFor "6"
-lcdc SaveFrame @OUT/shot-sub2.pgm
+lcdc SaveFrame @OUT/shot-d-open.pgm
+emulation RunFor "8"
+lcdc SaveFrame @OUT/shot-e.pgm

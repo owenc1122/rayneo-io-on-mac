@@ -1,0 +1,14 @@
+# Virtual phone pushes notifications (business 0x15, type 1). Keep the screen awake and capture
+# several frames so one lands inside a 5 s notification banner window.
+emulation RunFor "34"
+gpio0 Pulse 1 false 120
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-notif-1.pgm
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-notif-2.pgm
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-notif-3.pgm
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-notif-4.pgm
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-notif-5.pgm
