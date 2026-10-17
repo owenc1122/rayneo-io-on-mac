@@ -301,7 +301,7 @@ class RnlinkPhone:
         # isFinal; sid+round tie it to the session.
         sid = 'standin-sid-1'
         self.tx(0x0d, pb_msg(self.ASSIST_DOMAIN, message=json.dumps(
-            {'domain': 'intent', 'intent': 'chat', 'sid': sid, 'round': 1,
+            {'domain': 'chat', 'intent': 'chat', 'sid': sid, 'round': 1,
              'answer': answer, 'text': answer, 'isFinal': True})))
         self.say('rnlink VOICE_ASSISTANT -> DOMAIN answer %r' % answer)
         self.tx(0x0d, pb_msg(self.ASSIST_NLP_DONE, message=json.dumps(
