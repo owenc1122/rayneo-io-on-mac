@@ -22,6 +22,7 @@ using Antmicro.Renode.Core;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Time;
 using Antmicro.Renode.Peripherals.Timers;
+using Antmicro.Renode.Peripherals.Memory;
 namespace Antmicro.Renode.Peripherals.Miscellaneous
 {
     public sealed class BES1700_BTController : BES1700_RegisterBank, IGPIOSender
@@ -130,22 +131,21 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         }
         private void Program(ulong now,int idx) {
             ulong a=exchangeTable+(ulong)idx*16;
-            var bus=machine.SystemBus;
-            ushort ctrl=bus.ReadWord(a);
-            ulong slot=bus.ReadWord(a+2)|((ulong)(bus.ReadWord(a+4)&0xfff)<<16);
-            ulong fine=Math.Min((ulong)bus.ReadWord(a+6)&0x3ff,HalfSlot-1);
-            ushort dur=bus.ReadWord(a+0xa);
+            ushort ctrl=EmRW(a);
+            ulong slot=EmRW(a+2)|((ulong)(EmRW(a+4)&0xfff)<<16);
+            ulong fine=Math.Min((ulong)EmRW(a+6)&0x3ff,HalfSlot-1);
+            ushort dur=EmRW(a+0xa);
             ulong start=Unwrap(now,slot*HalfSlot+(HalfSlot-1-fine));
             ulong len=(dur&0x8000)!=0 ? (ulong)(dur&0x7fff)*HalfSlot : (ulong)dur*2;
             if(len==0) len=HalfSlot;
             SetStatus(a,1);
-            pending.Add(new Activity { Index=idx, Start=start, Planned=start, Length=len, Mode=ctrl&7, Cs=exchangeTable+(ulong)bus.ReadWord(a+8)*8 });
+            pending.Add(new Activity { Index=idx, Start=start, Planned=start, Length=len, Mode=ctrl&7, Cs=exchangeTable+(ulong)EmRW(a+8)*8 });
             if(TraceEvents) {
                 // Research aid: scheduler callback (sch_prog env 0x68008898) and the control structure.
-                uint cb=bus.ReadDoubleWord(0x68008898UL+(ulong)idx*16+4);
-                ulong cs=exchangeTable+(ulong)bus.ReadWord(a+8)*8;
+                uint cb=EmRD(0x68008898UL+(ulong)idx*16+4);
+                ulong cs=exchangeTable+(ulong)EmRW(a+8)*8;
                 var words=new System.Text.StringBuilder();
-                if(dumped.Add(cs)) for(ulong o=0;o<0xb0;o+=2) words.AppendFormat("{0:x4} ",bus.ReadWord(cs+o));
+                if(dumped.Add(cs)) for(ulong o=0;o<0xb0;o+=2) words.AppendFormat("{0:x4} ",EmRW(cs+o));
                 this.Log(LogLevel.Info,"ET{0} mode {1} ctrl {5:x4} start {2} (now {3}) len {4}us cb {6:x} cs {7:x} {8}",idx,ctrl&7,start,now,len/2,ctrl,cb,cs,words);
             }
         }
@@ -158,9 +158,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             return t;
         }
         private void SetStatus(ulong a,int st) {
-            var bus=machine.SystemBus;
-            ushort ctrl=bus.ReadWord(a);
-            bus.WriteWord(a,(ushort)((ctrl&~0x38)|(st<<3)));
+            ushort ctrl=EmRW(a);
+            EmWW(a,(ushort)((ctrl&~0x38)|(st<<3)));
         }
         // Advance the timers and the activity sequencer to `now`; return the next deadline (or MaxValue).
         // Pure data work under lock(sync): touches no clock/alarm/NVIC (the caller does that outside sync).
@@ -209,6 +208,26 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         // leaf lock (never nested with sync) since both the MMIO and timer threads read it outside sync.
         private ulong Now { get { lock(clockLock) { uint v=(uint)clock.Value; if(v<lastClock) clockHigh+=1UL<<32; lastClock=v; return clockHigh|v; } } }
         private readonly object clockLock=new object();
+
+        // Exchange-memory and control-structure access goes straight to the backing MappedMemory instead
+        // of through machine.SystemBus. The sysbus takes a lock that a CPU's MMIO dispatch also holds, so
+        // a SystemBus call made while holding lock(sync) (e.g. from the alarm/timer thread) would invert
+        // with a CPU access into this controller (sysbus -> sync) and deadlock. Direct memory access
+        // touches only the memory's own backing store, never sync or the sysbus lock.
+        private readonly List<Tuple<ulong,ulong,MappedMemory>> mems=new List<Tuple<ulong,ulong,MappedMemory>>();
+        private MappedMemory MemAt(ulong a,out long off) {
+            foreach(var m in mems) if(a>=m.Item1 && a<m.Item2) { off=(long)(a-m.Item1); return m.Item3; }
+            var r=machine.SystemBus.WhatIsAt(a);
+            var mem=r.Peripheral as MappedMemory;
+            ulong start=r.RegistrationPoint.Range.StartAddress;
+            mems.Add(Tuple.Create(start,start+(ulong)mem.Size,mem));
+            off=(long)(a-start); return mem;
+        }
+        private ushort EmRW(ulong a){ long o; var m=MemAt(a,out o); return (ushort)(m.ReadByte(o)|(m.ReadByte(o+1)<<8)); }
+        private void EmWW(ulong a,int v){ long o; var m=MemAt(a,out o); m.WriteByte(o,(byte)v); m.WriteByte(o+1,(byte)(v>>8)); }
+        private uint EmRD(ulong a){ long o; var m=MemAt(a,out o); uint x=0; for(int i=0;i<4;i++) x|=(uint)m.ReadByte(o+i)<<(8*i); return x; }
+        private byte EmRB(ulong a){ long o; var m=MemAt(a,out o); return m.ReadByte(o); }
+        private void EmWB(ulong a,byte v){ long o; var m=MemAt(a,out o); m.WriteByte(o,v); }
         private uint lastClock; private ulong clockHigh;
 
         private struct Activity { public int Index; public ulong Start; public ulong Planned; public ulong Length; public int Mode; public ulong Cs; }
@@ -229,8 +248,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         public int PeerPort { get; set; }
 
         private void AirExchange(ref Activity act) {
-            var bus=machine.SystemBus;
-            int fmt=bus.ReadWord(act.Cs)&0x1f;
+            int fmt=EmRW(act.Cs)&0x1f;
             try {
                 if(fmt==AdvFormat) {
                     var line=new System.Text.StringBuilder();
@@ -267,34 +285,32 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 peer?.Dispose(); peer=null;
             }
         }
-        private string BdAddr(ulong cs) {
-            var bus=machine.SystemBus; var sb=new System.Text.StringBuilder();
-            for(ulong i=0;i<6;i++) sb.AppendFormat("{0:x2}",bus.ReadByte(cs+0x8+i));
+        private string BdAddr(ulong cs) { var sb=new System.Text.StringBuilder();
+            for(ulong i=0;i<6;i++) sb.AppendFormat("{0:x2}",EmRB(cs+0x8+i));
             return sb.ToString();
         }
         // Walk the control structure's TX descriptor list. Advertising: report the whole ring.
         // Connection: the hardware stays on the last transmitted descriptor (TXDONE set) until
         // software links a new one through its next pointer; send the first pending descriptor,
         // mark it done and make it the list head.
-        private List<string> TxChain(ulong cs,bool consume) {
-            var bus=machine.SystemBus; var res=new List<string>();
-            ushort head=bus.ReadWord(cs+0x24);
+        private List<string> TxChain(ulong cs,bool consume) { var res=new List<string>();
+            ushort head=EmRW(cs+0x24);
             ushort p=head;
             for(int n=0;n<16 && (p&0x7fff)!=0;n++) {
                 ulong d=exchangeTable+(ulong)(p&0x7fff)*8;
-                ushort w0=bus.ReadWord(d);
+                ushort w0=EmRW(d);
                 if(consume && (w0&0x8000)!=0) {
                     p=(ushort)(w0&0x7fff);
-                    if(p!=0) bus.WriteWord(cs+0x24,p);
+                    if(p!=0) EmWW(cs+0x24,p);
                     continue;
                 }
-                int hdr=bus.ReadWord(d+2), len=hdr>>8;
-                ulong data=exchangeTable+(ulong)bus.ReadWord(d+4)*2;
+                int hdr=EmRW(d+2), len=hdr>>8;
+                ulong data=exchangeTable+(ulong)EmRW(d+4)*2;
                 var sb=new System.Text.StringBuilder(); sb.AppendFormat("{0:x4}:",hdr);
                 int dlen=consume ? len : Math.Max(0,len-6);
-                if(bus.ReadWord(d+4)!=0) for(int i=0;i<dlen;i++) sb.AppendFormat("{0:x2}",bus.ReadByte(data+(ulong)i));
+                if(EmRW(d+4)!=0) for(int i=0;i<dlen;i++) sb.AppendFormat("{0:x2}",EmRB(data+(ulong)i));
                 res.Add(sb.ToString());
-                if(consume) { bus.WriteWord(d,(ushort)(w0|0x8000)); break; }
+                if(consume) { EmWW(d,(ushort)(w0|0x8000)); break; }
                 p=(ushort)(w0&0x7fff);
                 if(p==head) break;
             }
@@ -302,21 +318,20 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         }
         // Fill the RX descriptor the BLE core currently points at (register 0x828) and advance.
         private void WriteRx(int header,byte[] payload,ulong when) {
-            var bus=machine.SystemBus;
             uint cur=base.ReadDoubleWord(0x828)&0x7fff;
             if(cur==0) return;
             ulong d=exchangeTable+cur*8;
-            ushort w0=bus.ReadWord(d);
-            ulong data=exchangeTable+(ulong)bus.ReadWord(d+0x14)*2;
-            for(int i=0;i<payload.Length;i++) bus.WriteByte(data+(ulong)i,payload[i]);
-            bus.WriteWord(d+2,0);                       // status: no sync/CRC/length errors
-            bus.WriteWord(d+4,(ushort)header);
-            bus.WriteWord(d+6,0);                       // 1M PHY
-            bus.WriteWord(d+8,(ushort)((when/HalfSlot)&0xffff));
-            bus.WriteWord(d+0xa,(ushort)(((when/HalfSlot)>>16)&0xfff));
-            bus.WriteWord(d+0xc,(ushort)(HalfSlot-1-when%HalfSlot));
-            bus.WriteWord(d+0x10,0);                    // no resolving-list match
-            bus.WriteWord(d,(ushort)(w0|0x8000));       // RXDONE
+            ushort w0=EmRW(d);
+            ulong data=exchangeTable+(ulong)EmRW(d+0x14)*2;
+            for(int i=0;i<payload.Length;i++) EmWB(data+(ulong)i,payload[i]);
+            EmWW(d+2,0);                       // status: no sync/CRC/length errors
+            EmWW(d+4,(ushort)header);
+            EmWW(d+6,0);                       // 1M PHY
+            EmWW(d+8,(ushort)((when/HalfSlot)&0xffff));
+            EmWW(d+0xa,(ushort)(((when/HalfSlot)>>16)&0xfff));
+            EmWW(d+0xc,(ushort)(HalfSlot-1-when%HalfSlot));
+            EmWW(d+0x10,0);                    // no resolving-list match
+            EmWW(d,(ushort)(w0|0x8000));       // RXDONE
             base.WriteDoubleWord(0x828,(uint)(w0&0x7fff));
         }
         private string PeerCall(string line) {
