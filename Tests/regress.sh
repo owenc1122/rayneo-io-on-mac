@@ -80,6 +80,7 @@ check "assistant: answer card rendered (ChatDomain)" "[ \$(n assistant 'ChatDoma
 check "btrecord: phone-configured double-click starts recording" "[ \$(n btrecord 'startRecordingSync') -gt 0 ]"
 check "settings: phone config applied (head-up threshold)" "[ \$(n settings 'apply head up threshold') -gt 0 ]"
 check "settings: glasses reports config back (both ways)" "[ \$(n settings 'sending wakeup_config report') -gt 0 ]"
+check "settings: phone-enabled head-up wakes the screen (headup=1)" "[ \$(n settings 'screen on by headup=1') -gt 0 ]"
 check "todo: item pushed and inserted on the card" "[ \$(n todo 'result=insert') -gt 0 ]"
 echo "results in $out"
 exit $fail
