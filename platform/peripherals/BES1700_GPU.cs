@@ -264,9 +264,9 @@ namespace Antmicro.Renode.Peripherals.Video
             if(s.Filter==0) return Fetch(s,(int)Math.Floor(u),(int)Math.Floor(v),rows);   // VG_LITE_FILTER_POINT
             float fx=u-0.5f,fy=v-0.5f; int x0=(int)Math.Floor(fx),y0=(int)Math.Floor(fy); float ax=fx-x0,ay=fy-y0;
             C a=Fetch(s,x0,y0,rows),b=Fetch(s,x0+1,y0,rows),c=Fetch(s,x0,y0+1,rows),d=Fetch(s,x0+1,y0+1,rows);
-            Func<float,float,float,float,float> bl=(p,q,r,t)=>(p*(1-ax)+q*ax)*(1-ay)+(r*(1-ax)+t*ax)*ay;
-            return new C{R=bl(a.R,b.R,c.R,d.R),G=bl(a.G,b.G,c.G,d.G),B=bl(a.B,b.B,c.B,d.B),A=bl(a.A,b.A,c.A,d.A)};
+            return new C{R=Bilerp(a.R,b.R,c.R,d.R,ax,ay),G=Bilerp(a.G,b.G,c.G,d.G,ax,ay),B=Bilerp(a.B,b.B,c.B,d.B,ax,ay),A=Bilerp(a.A,b.A,c.A,d.A,ax,ay)};
         }
+        private static float Bilerp(float p,float q,float r,float t,float ax,float ay) {return (p*(1-ax)+q*ax)*(1-ay)+(r*(1-ax)+t*ax)*ay;}
         // Inverse-mapped texture steps (0xA18..0xA22, reference vg_lite_blit): u=(c0+x*x0+y*y0)/w*W, v=(c1+x*x1+y*y1)/w*H, w=c2+x*x2+y*y2.
         private bool Uv(Src s,int x,int y,out float u,out float v) {
             var m=uvm;

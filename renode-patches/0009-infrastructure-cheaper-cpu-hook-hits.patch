@@ -1,0 +1,67 @@
+diff --git a/src/Emulator/Peripherals/Peripherals/CPU/HookDescriptor.cs b/src/Emulator/Peripherals/Peripherals/CPU/HookDescriptor.cs
+index be17b2f82..7325ac58a 100644
+--- a/src/Emulator/Peripherals/Peripherals/CPU/HookDescriptor.cs
++++ b/src/Emulator/Peripherals/Peripherals/CPU/HookDescriptor.cs
+@@ -29,14 +29,21 @@ public void AddHook(ulong addr, CpuAddressHook callback)
+                 }
+ 
+                 hooks[addr].Callbacks.Add(callback);
++                anyNew |= hooks[addr].IsNew;
+                 Logger.DebugLog(cpu, "Added hook @ 0x{0:X}", addr);
+             }
+         }
+ 
+         public void ActivateNewHooks()
+         {
++            // Called before every execution round; hooks are only new between AddHook and this call
++            if(!anyNew)
++            {
++                return;
++            }
+             lock(hooks)
+             {
++                anyNew = false;
+                 foreach(var newHook in hooks.Where(x => x.Value.IsNew))
+                 {
+                     Activate(newHook.Value);
+@@ -140,6 +147,11 @@ public void Reactivate()
+         {
+             lock(hooks)
+             {
++                if(!isAnyInactive)
++                {
++                    // Nothing to re-arm and no state change to report
++                    return;
++                }
+                 foreach(var inactive in hooks.Where(x => !x.Value.IsActive))
+                 {
+                     Activate(inactive.Value);
+@@ -214,6 +226,7 @@ private void Deactivate(Hook hook)
+         private readonly Dictionary<ulong, Hook> hooks;
+ 
+         bool isAnyInactive;
++        volatile bool anyNew;
+ 
+         protected class Hook
+         {
+diff --git a/src/Emulator/Peripherals/Peripherals/CPU/TranslationCPU.cs b/src/Emulator/Peripherals/Peripherals/CPU/TranslationCPU.cs
+index 7906fc471..a78ff7b6d 100644
+--- a/src/Emulator/Peripherals/Peripherals/CPU/TranslationCPU.cs
++++ b/src/Emulator/Peripherals/Peripherals/CPU/TranslationCPU.cs
+@@ -1438,7 +1438,15 @@ protected override bool ExecutionFinished(ExecutionResult result)
+             if(result == ExecutionResult.StoppedAtBreakpoint)
+             {
+                 this.Trace();
+-                hooks.Execute(PC);
++                var hookAddress = PC.RawValue;
++                hooks.Execute(hookAddress);
++                if(PC.RawValue != hookAddress)
++                {
++                    // A hook that moved PC elsewhere leaves nothing to step over: execution resumes at the
++                    // new PC with the breakpoint still in place, so it stays armed without the
++                    // remove/re-add cycle below.
++                    return true;
++                }
+                 // it is necessary to deactivate hooks installed on this PC before
+                 // calling `tlib_execute` again to avoid a loop;
+                 // we need to do this because creating a breakpoint has caused special

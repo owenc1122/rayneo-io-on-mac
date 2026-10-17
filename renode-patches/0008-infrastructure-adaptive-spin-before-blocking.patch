@@ -1,0 +1,54 @@
+diff --git a/src/Emulator/Main/Utilities/MonitorCondition.cs b/src/Emulator/Main/Utilities/MonitorCondition.cs
+index b2e048ef8..582342b3a 100644
+--- a/src/Emulator/Main/Utilities/MonitorCondition.cs
++++ b/src/Emulator/Main/Utilities/MonitorCondition.cs
+@@ -6,6 +6,7 @@
+ //
+ using System;
+ using System.Collections.Generic;
++using System.Diagnostics;
+ using System.Threading;
+ 
+ using Antmicro.Renode.Logging;
+@@ -174,9 +175,41 @@ public Waiter()
+ 
+             public void Wait()
+             {
++                // Hand-offs between the time source and the CPU threads (serial execution) mostly complete within
++                // tens of microseconds, while waking a blocked thread costs several microseconds each time. Spin
++                // for about as long as recent waits took, up to a cap; when waits get long (e.g. the emulation is
++                // paced to the host clock) the budget decays and the thread blocks right away.
++                var start = Stopwatch.GetTimestamp();
++                var budget = Volatile.Read(ref spinBudget);
++                for(var i = 0; budget > 0; i++)
++                {
++                    if(semaphore.CurrentCount > 0 && semaphore.Wait(0))
++                    {
++                        Learn(Stopwatch.GetTimestamp() - start);
++                        return;
++                    }
++                    Thread.SpinWait(4);
++                    if((i & 31) == 31 && Stopwatch.GetTimestamp() - start > budget)
++                    {
++                        break;
++                    }
++                }
+                 semaphore.Wait();
++                Learn(Stopwatch.GetTimestamp() - start);
+             }
+ 
++            private void Learn(long waited)
++            {
++                // Next budget: 1.5x this wait if it was short enough to be worth spinning for, otherwise decay
++                var next = waited < MaxSpin ? Math.Min(MaxSpin, waited + waited / 2 + MinSpin) : spinBudget / 2;
++                Volatile.Write(ref spinBudget, next);
++            }
++
++            private long spinBudget = MinSpin;
++
++            private static readonly long MaxSpin = Stopwatch.Frequency / 2000;   // 500 us
++            private static readonly long MinSpin = Stopwatch.Frequency / 200000; // 5 us
++
+             public void Signal()
+             {
+                 semaphore.Release();

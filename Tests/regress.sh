@@ -11,19 +11,19 @@ out=${2:-$root/.local/regress/$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$out"; out=$(cd "$out" && pwd)
 ta=$root/.local/test-audio
 export FONTS=${FONTS:-$root/.local/fonts-factory}
-base=${PORT_BASE:-24000}
-peer_base=${PEER_BASE:-24100}
+# Free local TCP ports, so several regressions (other checkouts, other sessions) can run at once.
+free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
 
 run() {  # run <name> <seconds> <scenario> [env...]
     name=$1 secs=$2 scen=$3; shift 3
-    (env "$@" SCENARIO="$root/Tests/scenarios/$scen" RENODE_BATCH_PORT=$((base + $(echo "$name" | cksum | cut -c1-3) % 90)) \
+    (env "$@" SCENARIO="$root/Tests/scenarios/$scen" RENODE_BATCH_PORT=$(free_port) \
         sh scripts/emulate.sh "$fw" "$secs" "$out/$name" "${EXTRA:-}" > /dev/null 2>&1) &
     jobs_pids="${jobs_pids:-} $!"
 }
 phone() {  # phone <name> <seconds> <scenario> [PEER_ENV=val ...]: with the virtual BLE phone.
            # Any trailing VAR=val args set env on ble-peer.py (so a scenario can enable its demo push).
     name=$1 secs=$2 scen=$3; shift 3
-    port=$((peer_base + $(echo "$name" | cksum | cut -c1-3) % 90))
+    port=$(free_port)
     mkdir -p "$out/$name"
     env "$@" python3 scripts/ble-peer.py --port "$port" --log "$out/$name/peer.log" > /dev/null 2>&1 &
     peer_pids="${peer_pids:-} $!"
