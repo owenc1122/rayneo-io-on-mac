@@ -25,7 +25,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             this.machine = machine; this.audio = audio; this.dma = dma;
             timer = new LimitTimer(machine.ClockSource, 1000000, this, "codec", 1000, Direction.Descending,
                 enabled: true, workMode: WorkMode.Periodic, eventEnabled: true, autoUpdate: true);
-            timer.LimitReached += Tick;
+            timer.LimitReached += () => machine.ScheduleAction(TimeInterval.Empty, _ => Tick());   // off the clock-source lock
         }
 
         public long Size => 0x8000;
