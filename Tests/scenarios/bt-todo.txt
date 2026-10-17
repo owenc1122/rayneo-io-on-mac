@@ -1,0 +1,6 @@
+# Virtual phone pushes a to-do item (business 0x16 single_upsert); the home to-do card shows it.
+# Wake the screen before capturing so it isn't auto-off.
+emulation RunFor "35"
+gpio0 Pulse 1 false 120
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-todo.pgm

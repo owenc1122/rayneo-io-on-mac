@@ -149,6 +149,7 @@ class RnlinkPhone:
         self.notif_demo = bool(os.environ.get('NOTIF_DEMO'))
         self.record_demo = bool(os.environ.get('RECORD_DEMO'))
         self.settings_demo = bool(os.environ.get('SETTINGS_DEMO'))
+        self.todo_demo = bool(os.environ.get('TODO_DEMO'))
         self.started = False
         self.dev_info_done = False
         self.authed = False
@@ -368,6 +369,19 @@ class RnlinkPhone:
                                       seq=self.caption_seq, mode=2, status=1)
 
     # ---- phone-driven features ----
+    def push_todo(self, events=None):
+        import json, time as _t
+        # TodoLink (business 0x16) is a PbMsg: type 2 = single add/modify (single_upsert), message = JSON
+        # {eventList:[...], hasMoreTodo}. TodoProtocol_HandleSingleAddModify parses it.
+        if events is None:
+            now = int(_t.time() * 1000)
+            events = [{'eventID': '1792240000001', 'title': '10:00 产品评审会', 'content': '产品评审会',
+                       'startTime': now + 3600000, 'endTime': now + 7200000,
+                       'isCompleted': False, 'allDay': False, 'reminder': 0}]
+        msg = json.dumps({'eventList': events, 'hasMoreTodo': False})
+        self.say('rnlink -> TODO %s' % msg)
+        self.tx(0x16, pb_msg(2, message=msg))
+
     def push_weather(self, temp=23, location='Shanghai', icon=1):
         import json
         # Dashboard command (launcher receiveMessage type 0x12 -> DashboardProtocolController::decode,
@@ -427,6 +441,8 @@ class RnlinkPhone:
                 if getattr(self, 'settings_demo', False):
                     # Settings sync (phone -> glasses): enable head-up (raise-to-wake) via wakeup_config.
                     self.set_wakeup_config(headup=1, headup_degree=20, crown=1)
+                if getattr(self, 'todo_demo', False):
+                    self.push_todo()
                 if getattr(self, 'notif_demo', False):
                     # Notification channel = business 0x15; "type" 1 = add/display (2 remove, 3 update).
                     self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',
