@@ -109,8 +109,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         }
         // Busy-wait on the 16384 Hz AON counter (hal_sys_timer_delay_in_sleep: hal_timer_common_reload waits
         // two ticks on every OS timer reprogram) spins ~4000 loop iterations per tick, each one a model read.
-        // A CPU that re-reads an unchanged value in a tight loop is halted for a quarter tick instead; the
-        // loop still sees the counter advance at the same virtual times.
+        // A CPU that re-reads an unchanged value in a tight loop skips a quarter tick (SkipTime, on its own
+        // thread) instead; the loop still sees the counter advance at the same virtual times.
         public bool PollHalt { get; set; } = true;
         private void Poll(uint value) {
             if(!machine.SystemBus.TryGetCurrentCPU(out var current) || !(current is TranslationCPU cpu)) return;
@@ -119,8 +119,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             if(polls.TryGetValue(cpu,out var last) && last.Value==value && executed-last.Executed<64) n=last.Count+1;
             if(n>=4) {
                 polls[cpu]=new PollState{Value=value,Executed=executed,Count=0};
-                cpu.IsHalted=true;
-                machine.ScheduleAction(TimeInterval.FromMicroseconds(15),_=>cpu.IsHalted=false);
+                cpu.SkipTime(TimeInterval.FromMicroseconds(15));
                 return;
             }
             polls[cpu]=new PollState{Value=value,Executed=executed,Count=n};

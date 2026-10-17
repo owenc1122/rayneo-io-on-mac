@@ -49,20 +49,17 @@ if %s:
         if _l.strip(): print('[C1] ' + _l.rstrip())
 ''' % (cond, ap)
 def delay_hook(unit):
+    # The core skips the requested time (SkipTime: consumed on its own thread, no instructions executed)
+    # and returns to the caller. Halting it instead (IsHalted) made Renode flush the core's whole
+    # translation cache and restart its thread on every wake-up.
     return '''
 from Antmicro.Renode.Time import TimeInterval
 from Antmicro.Renode.Peripherals.CPU import RegisterValue
-from System import Action
 n = int(self.GetRegister(0).RawValue)
 us = n if '%s' == 'us' else n // 1000
 if us > 0:
-    cpu = self
-    ret = cpu.GetRegister(14).RawValue
-    def wake(t):
-        cpu.PC = RegisterValue.Create(ret, 32)
-        cpu.IsHalted = False
-    cpu.IsHalted = True
-    machine.ScheduleAction(TimeInterval.FromMicroseconds(us), Action[TimeInterval](wake))
+    self.PC = RegisterValue.Create(self.GetRegister(14).RawValue, 32)
+    self.SkipTime(TimeInterval.FromMicroseconds(us))
 ''' % unit
 out_hook = '''
 buf = self.GetRegister(0).RawValue
@@ -101,7 +98,10 @@ lines += [
     # shared by several cores race. Needs Renode >= 1.17.0+20261016 (the 20260906 build stalled in WFI).
 ] + ([] if __import__('os').environ.get('SERIAL') == '0' else ['emulation SetGlobalSerialExecution true']) + (
     # QUANTUM=<seconds>: cores synchronise every quantum (Renode default 0.0001).
-    [f'emulation SetGlobalQuantum "{__import__("os").environ["QUANTUM"]}"'] if __import__('os').environ.get('QUANTUM') else []) + [
+    [f'emulation SetGlobalQuantum "{__import__("os").environ["QUANTUM"]}"'] if __import__('os').environ.get('QUANTUM') else []) + (
+    # Renode keeps virtual time from running ahead of the host clock by default; ADVANCE=1 runs flat
+    # out (for measuring the emulator's own speed).
+    ['emulation SetGlobalAdvanceImmediately true'] if __import__('os').environ.get('ADVANCE') == '1' else []) + [
     'cpu PerformanceInMips 200',
     'btc PerformanceInMips 100',
     'bth PerformanceInMips 100',
@@ -123,8 +123,8 @@ lines += [
     'c1 AddHook 0x00103cb8 "self.PC = Antmicro.Renode.Peripherals.CPU.RegisterValue.Create(0x103b5d, 32)"',
     # AP busy-wait delays on the 6 MHz counter (sysCmu +0x288): hal_sys_timer_delay_us(us) and
     # hal_sys_timer_delay_ns(ns) are 4-instruction loops reading the counter ~50 times per emulated
-    # microsecond, each read a model call. The hook halts the core for exactly the requested time and
-    # resumes it at the caller (interrupts arriving meanwhile are taken afterwards). DELAY_SPIN=1 keeps them.
+    # microsecond, each read a model call. The hook returns to the caller and lets the core skip exactly
+    # the requested time (interrupts arriving meanwhile are taken afterwards). DELAY_SPIN=1 keeps them.
 ]) + ([] if __import__('os').environ.get('DELAY_SPIN') == '1' else [
     'cpu AddHook 0x0011492c """' + delay_hook('us') + '"""',
     'cpu AddHook 0x0012f450 """' + delay_hook('ns') + '"""',

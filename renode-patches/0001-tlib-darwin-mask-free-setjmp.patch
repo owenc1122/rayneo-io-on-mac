@@ -1,0 +1,40 @@
+diff --git a/include/cpu-defs.h b/include/cpu-defs.h
+index f0d2e51f..8dca67d2 100644
+--- a/include/cpu-defs.h
++++ b/include/cpu-defs.h
+@@ -19,6 +19,15 @@
+ #pragma once
+ 
+ #include <setjmp.h>
++#if defined(__APPLE__)
++/* Darwin's setjmp/longjmp save and restore the signal mask (a sigprocmask syscall each, plus
++ * sigaltstack), on every CPU-loop exit and every exported-call wrapper. tlib never changes the
++ * signal mask, so the mask-free variants are equivalent and avoid the syscalls. */
++#undef setjmp
++#define setjmp(env) _setjmp(env)
++#undef longjmp
++#define longjmp(buf, val) _longjmp(buf, val)
++#endif
+ #include <inttypes.h>
+ #include <signal.h>
+ #include "osdep.h"
+diff --git a/include/unwind.h b/include/unwind.h
+index 74b852db..34bbe8a1 100644
+--- a/include/unwind.h
++++ b/include/unwind.h
+@@ -1,6 +1,15 @@
+ #pragma once
+ 
+ #include <setjmp.h>
++#if defined(__APPLE__)
++/* Darwin's setjmp/longjmp save and restore the signal mask (a sigprocmask syscall each, plus
++ * sigaltstack), on every CPU-loop exit and every exported-call wrapper. tlib never changes the
++ * signal mask, so the mask-free variants are equivalent and avoid the syscalls. */
++#undef setjmp
++#define setjmp(env) _setjmp(env)
++#undef longjmp
++#define longjmp(buf, val) _longjmp(buf, val)
++#endif
+ #include <stdbool.h>
+ #include <stdlib.h>
+ 

@@ -72,8 +72,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         public string TapDirectory { get; set; }
         public string SpeakerFile { get { return spkPath; } set { lock(sync) { spkPath = value; spkStream?.Dispose(); spkStream = null; } } }
         // Wake word: folder of 16 kHz enrolment WAVs (scripts/make-kws-templates.sh), match threshold.
-        public string KwsTemplates { get { return kwsDir; } set { lock(micLock) { kwsDir = value; spotters = null; } } }
-        public double KwsThreshold { get; set; } = 16.5;
+        // The templates' features are computed here (at script time) rather than on the first use, where the
+        // ~0.6 s of host time landed in the middle of the emulated double-click that opens the stream.
+        public string KwsTemplates { get { return kwsDir; } set { lock(micLock) { kwsDir = value; spotters = null; LoadSpotters(); } } }
+        public double KwsThreshold { get { return kwsThreshold; } set { lock(micLock) { kwsThreshold = value; spotters = null; } } }
+        private double kwsThreshold = 16.5;
         // Offline check of the spotter on a WAV: hit times (s) and the best (lowest) score.
         public string KwsScan(string wav)
         {

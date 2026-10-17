@@ -206,11 +206,13 @@ namespace Antmicro.Renode.Peripherals.Video
             int x1=x+w,y1=y+h; Clip(t,ref x,ref y,ref x1,ref y1,false);
             int bpp=TargetBpp(t.Format); if(bpp==0) {Once("tf"+t.Format,"Unsupported target format {0:X}",t.Format);return;}
             if(x>=x1||y>=y1) return;
+            var r=ReadRect(t,x,y,x1,y1,bpp); var row=new byte[r.RowLen];
             for(int yy=y;yy<y1;yy++) {
-                ulong a=t.Address+(ulong)(yy*t.Stride+x*bpp); var row=bus.ReadBytes(a,(x1-x)*bpp);
+                r.Get(yy-y,row);
                 for(int xx=0;xx<x1-x;xx++) WriteTarget(t,row,xx,doBlend?Blend(c,ReadTarget(t,row,xx),blend,1):c);
-                bus.WriteBytes(row,a);
+                r.Put(yy-y,row);
             }
+            r.Write(bus);
         }
 
         // ---------------- image source ----------------
@@ -267,13 +269,37 @@ namespace Antmicro.Renode.Peripherals.Video
         }
         // Inverse-mapped texture steps (0xA18..0xA22, reference vg_lite_blit): u=(c0+x*x0+y*y0)/w*W, v=(c1+x*x1+y*y1)/w*H, w=c2+x*x2+y*y2.
         private bool Uv(Src s,int x,int y,out float u,out float v) {
-            float w=F(0xa1a)+x*F(0xa1e)+y*F(0xa22);
+            var m=uvm;
+            float w=m[2]+x*m[6]+y*m[10];
             if(Math.Abs(w)<1e-9f) {u=v=-1;return false;}
-            u=(F(0xa18)+x*F(0xa1c)+y*F(0xa20))/w*s.Width; v=(F(0xa19)+x*F(0xa1d)+y*F(0xa21))/w*s.Height; return true;
+            u=(m[0]+x*m[4]+y*m[8])/w*s.Width; v=(m[1]+x*m[5]+y*m[9])/w*s.Height; return true;
+        }
+        // Paint state read once per primitive instead of per pixel: colour 0xA02, texture steps 0xA18..0xA22.
+        private void PrepPaint() {
+            paintCol=Unpack(S(0xa02));
+            for(int i=0;i<11;i++) uvm[i]=F(0xa18+(uint)i);
+        }
+        private C paintCol;
+        private readonly float[] uvm=new float[11];
+        // A target rectangle read and written back as one block: every bus write into RAM from a model
+        // invalidates translated code on all CPUs, so one write per primitive instead of one per row.
+        private sealed class Rect {
+            public byte[] Data; public ulong Base; public int Stride, RowLen;
+            public void Get(int r,byte[] row) {Array.Copy(Data,r*Stride,row,0,RowLen);}
+            public void Put(int r,byte[] row) {Array.Copy(row,0,Data,r*Stride,RowLen);}
+            public void Write(Antmicro.Renode.Peripherals.Bus.IBusController bus) {bus.WriteBytes(Data,Base);}
+        }
+        private Rect ReadRect(Target t,int x0,int y0,int x1,int y1,int bpp) {
+            int rowLen=(x1-x0)*bpp, stride=Math.Max(t.Stride,rowLen);
+            ulong b=t.Address+(ulong)(y0*t.Stride+x0*bpp);
+            if(t.Stride<rowLen) stride=rowLen;      // not expected; keep rows apart in the buffer
+            int len=(y1-y0-1)*stride+rowLen;
+            if(t.Stride<rowLen) {var d=new byte[len]; for(int r=0;r<y1-y0;r++) Array.Copy(bus.ReadBytes(b+(ulong)(r*t.Stride),rowLen),0,d,r*stride,rowLen); return new Rect{Data=d,Base=b,Stride=stride,RowLen=rowLen};}
+            return new Rect{Data=bus.ReadBytes(b,len),Base=b,Stride=stride,RowLen=rowLen};
         }
         private C Paint(uint ctrl,Src s,int x,int y,Dictionary<int,byte[]> rows,out bool inside) {
             inside=true;
-            uint image=(ctrl>>12)&7; C col=Unpack(S(0xa02));
+            uint image=(ctrl>>12)&7; C col=paintCol;
             if(!s.Valid || image==0) return col;
             if(!Uv(s,x,y,out float u,out float v) || u<0||v<0||u>=s.Width||v>=s.Height) {inside=false;return new C();}
             C t=Sample(s,u,v,rows);
@@ -289,15 +315,17 @@ namespace Antmicro.Renode.Peripherals.Video
         private void Blit(Target t,int x,int y,int w,int h,uint ctrl) {
             int x1=x+w,y1=y+h; Clip(t,ref x,ref y,ref x1,ref y1,false);
             int bpp=TargetBpp(t.Format); if(bpp==0||x>=x1||y>=y1) return;
-            var s=GetSource(); var rows=new Dictionary<int,byte[]>(); uint blend=(ctrl>>8)&0xf;
+            var s=GetSource(); var rows=new Dictionary<int,byte[]>(); uint blend=(ctrl>>8)&0xf; PrepPaint();
+            var r=ReadRect(t,x,y,x1,y1,bpp); var row=new byte[r.RowLen];
             for(int yy=y;yy<y1;yy++) {
-                ulong a=t.Address+(ulong)(yy*t.Stride+x*bpp); var row=bus.ReadBytes(a,(x1-x)*bpp);
+                r.Get(yy-y,row);
                 for(int xx=x;xx<x1;xx++) {
                     C p=Paint(ctrl,s,xx,yy,rows,out bool inside); if(!inside) continue;
                     WriteTarget(t,row,xx-x,Blend(p,ReadTarget(t,row,xx-x),blend,1));
                 }
-                bus.WriteBytes(row,a);
+                r.Put(yy-y,row);
             }
+            r.Write(bus);
         }
 
         // ---------------- paths ----------------
@@ -336,37 +364,47 @@ namespace Antmicro.Renode.Peripherals.Video
             foreach(var s in segs){minx=Math.Min(minx,Math.Min(s[0],s[2]));maxx=Math.Max(maxx,Math.Max(s[0],s[2]));miny=Math.Min(miny,Math.Min(s[1],s[3]));maxy=Math.Max(maxy,Math.Max(s[1],s[3]));}
             int x0=(int)Math.Floor(minx),y0=(int)Math.Floor(miny),x1=(int)Math.Ceiling(maxx)+1,y1=(int)Math.Ceiling(maxy)+1;
             Clip(t,ref x0,ref y0,ref x1,ref y1,true); if(x0>=x1||y0>=y1) return;
-            int sub=aa?4:1; var cov=new float[x1-x0]; var xs=new List<KeyValuePair<float,int>>();
-            var s2=GetSource(); var rows=new Dictionary<int,byte[]>(); uint blend=(ctrl>>8)&0xf;
+            int sub=aa?4:1; var cov=new float[x1-x0];
+            var s2=GetSource(); var rows=new Dictionary<int,byte[]>(); uint blend=(ctrl>>8)&0xf; PrepPaint();
+            var rect=ReadRect(t,x0,y0,x1,y1,bpp); var row=new byte[rect.RowLen]; bool anyDirty=false;
+            // Edges sorted by their top; the sample rows fy only increase, so an edge joins the active list once
+            // fy reaches its top and leaves it for good once fy reaches its bottom (the same lo<=fy<hi test as before).
+            var edges=new List<float[]>(); foreach(var s in segs) if(s[1]!=s[3]) edges.Add(s);
+            edges.Sort((a,b)=>Math.Min(a[1],a[3]).CompareTo(Math.Min(b[1],b[3])));
+            var active=new List<float[]>(); int next=0;
+            var xk=new float[edges.Count]; var xd=new int[edges.Count];
             for(int y=y0;y<y1;y++) {
                 Array.Clear(cov,0,cov.Length);
                 for(int k=0;k<sub;k++) {
-                    float fy=y+(k+0.5f)/sub; xs.Clear();
-                    foreach(var s in segs) {
-                        float ay=s[1],by=s[3]; if(ay==by) continue;
-                        int dir=by>ay?1:-1; float lo=Math.Min(ay,by),hi=Math.Max(ay,by);
-                        if(fy<lo||fy>=hi) continue;
-                        xs.Add(new KeyValuePair<float,int>(s[0]+(fy-ay)*(s[2]-s[0])/(by-ay),dir));
+                    float fy=y+(k+0.5f)/sub;
+                    while(next<edges.Count&&Math.Min(edges[next][1],edges[next][3])<=fy) active.Add(edges[next++]);
+                    active.RemoveAll(s=>fy>=Math.Max(s[1],s[3]));
+                    int n=0;
+                    foreach(var s in active) {
+                        float ay=s[1],by=s[3];
+                        xd[n]=by>ay?1:-1; xk[n++]=s[0]+(fy-ay)*(s[2]-s[0])/(by-ay);
                     }
-                    xs.Sort((a,b)=>a.Key.CompareTo(b.Key));
+                    // Crossings with equal x bound an empty span, so their order does not change the coverage.
+                    Array.Sort(xk,xd,0,n);
                     int wind=0;
-                    for(int i=0;i+1<xs.Count;i++) {
-                        wind+=xs[i].Value; bool inside=evenOdd?(i&1)==0:wind!=0;
+                    for(int i=0;i+1<n;i++) {
+                        wind+=xd[i]; bool inside=evenOdd?(i&1)==0:wind!=0;
                         if(!inside) continue;
-                        float a=Math.Max(xs[i].Key,x0),b=Math.Min(xs[i+1].Key,x1); if(b<=a) continue;
+                        float a=Math.Max(xk[i],x0),b=Math.Min(xk[i+1],x1); if(b<=a) continue;
                         for(int px=(int)Math.Floor(a);px<Math.Ceiling(b)&&px<x1;px++) {
                             float c=Math.Min(b,px+1)-Math.Max(a,px); if(c>0) cov[px-x0]+=(aa?c:(c>=0.5f||(a<=px+0.5f&&b>px+0.5f)?1:0))/sub;
                         }
                     }
                 }
-                ulong addr=t.Address+(ulong)(y*t.Stride+x0*bpp); var row=bus.ReadBytes(addr,(x1-x0)*bpp); bool dirty=false;
+                rect.Get(y-y0,row); bool dirty=false;
                 for(int i=0;i<cov.Length;i++) {
                     float c=Math.Min(1,cov[i]); if(c<=0) continue;
                     C p=Paint(ctrl,s2,x0+i,y,rows,out bool inside); if(!inside) continue;
                     WriteTarget(t,row,i,Blend(p,ReadTarget(t,row,i),blend,c)); dirty=true;
                 }
-                if(dirty) bus.WriteBytes(row,addr);
+                if(dirty) {rect.Put(y-y0,row); anyDirty=true;}
             }
+            if(anyDirty) rect.Write(bus);
         }
 
         private void Once(string key,string fmt,params object[] args) {if(seen.Add(key)) this.Log(LogLevel.Warning,fmt,args);}

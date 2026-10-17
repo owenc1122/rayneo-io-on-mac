@@ -4,6 +4,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 renode=${RENODE:-$PWD/.local/renode/Renode.app/Contents/MacOS/renode}
+[ -n "${RENODE:-}" ] || [ ! -x "$PWD/.local/renode-build/renode" ] || renode=$PWD/.local/renode-build/renode
 port=${PORT:-23499}
 tmp=$(mktemp -d)
 for name in $(cat platform/peripherals.list); do echo "include @$PWD/platform/peripherals/$name.cs"; done > "$tmp/check.resc"
