@@ -80,6 +80,10 @@ lines += [
 ]) + [
     'logLevel 3 nvic',
     'logLevel 3 bthNvic',
+    # All cores on one emulation thread (SERIAL=0 to run them in parallel). With parallel CPU threads,
+    # guest spinlocks shared by the AP/M55C1/BTH occasionally livelock inside tlib, and peripheral models
+    # shared by several cores race. Needs Renode >= 1.17.0+20261016 (the 20260906 build stalled in WFI).
+] + ([] if __import__('os').environ.get('SERIAL') == '0' else ['emulation SetGlobalSerialExecution true']) + [
     'cpu PerformanceInMips 200',
     'btc PerformanceInMips 100',
     'bth PerformanceInMips 100',

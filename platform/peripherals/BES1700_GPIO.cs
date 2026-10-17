@@ -19,11 +19,14 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
 {
     public class BES1700_GPIO : IDoubleWordPeripheral, IKnownSize, IGPIOReceiver
     {
-        public BES1700_GPIO(IMachine machine, bool panelSPI = false, byte panelId = 0x87, uint pullUps = 0)
-        { this.machine = machine; this.panelSPI = panelSPI; this.panelId = panelId; this.pullUps = pullUps; IRQ = new GPIO(); Reset(); }
+        public BES1700_GPIO(IMachine machine, bool panelSPI = false, byte panelId = 0x87, uint pullUps = 0, uint invertedInputs = 0)
+        { this.machine = machine; this.panelSPI = panelSPI; this.panelId = panelId; this.pullUps = pullUps; this.invertedInputs = invertedInputs; IRQ = new GPIO(); Reset(); }
         public long Size => 0x1000;
         public GPIO IRQ { get; private set; }
         public event Action PendingChanged;
+        // Raised after the driven output word changes (e.g. panel power enables seen by the LCDC model).
+        public event Action OutputChanged;
+        public uint Output => output & direction;
         public uint Pending => (raw & inten & ~mask);
 
         public uint ReadDoubleWord(long offset)
@@ -37,7 +40,7 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
                 case 0x3c: return polarity;
                 case 0x40: return Pending;
                 case 0x44: return raw;
-                case 0x50: return panelSPI ? (output & ~Miso) | (miso ? Miso : 0) : Level();
+                case 0x50: return panelSPI ? ((output & ~Miso) | (miso ? Miso : 0)) & PanelPins | (Level() & ~PanelPins) : Level();
                 default: return 0;
             }
         }
@@ -61,6 +64,7 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
                 case 0x4c: raw &= ~(value & edge); Reevaluate(); return;
                 default: return;
             }
+            if(old != output) OutputChanged?.Invoke();
             if(!panelSPI) { Reevaluate(); return; }
             if((output & ChipSelects) == ChipSelects) { bits=0; index=0; shift=0; miso=false; return; }
             if((old & ChipSelects) != (output & ChipSelects)) { bits=0; index=0; shift=0; }
@@ -77,7 +81,9 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
         }
 
         // ---- input side ----
-        public void OnGPIO(int number, bool value) { SetInput(number, value); }
+        // invertedInputs: lines from models that drive active-high where the board signal is active-low
+        // (e.g. the IMU INT1 with H_LACTIVE set by the firmware).
+        public void OnGPIO(int number, bool value) { SetInput(number, ((invertedInputs >> number) & 1) != 0 ? !value : value); }
         public void SetInput(int pin, bool level)
         {
             if(pin < 0 || pin > 31) return;
@@ -129,10 +135,11 @@ namespace Antmicro.Renode.Peripherals.GPIOPort
         private byte ReadPanelRegister(byte register) { return (byte)(((output&Cs)==0?registers[register]:255) & ((output&RightCs)==0?rightRegisters[register]:255)); }
         private const uint RightCs=1u<<23, ChipSelects=(1u<<16)|(1u<<23);
         private const uint Cs=1u<<16,Clock=1u<<17,Mosi=1u<<18,Miso=1u<<19;
+        private const uint PanelPins=ChipSelects|Clock|Mosi|Miso;
         private readonly IMachine machine;
         private readonly bool panelSPI;
         private readonly byte panelId;
-        private readonly uint pullUps;
+        private readonly uint pullUps, invertedInputs;
         private readonly byte[] rightRegisters=new byte[256];
         private readonly byte[] registers=new byte[256];
         private uint output,direction,inputs,inten,mask,edge,polarity,raw;

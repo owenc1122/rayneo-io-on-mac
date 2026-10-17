@@ -35,6 +35,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 direction:Direction.Ascending,enabled:true,eventEnabled:false,autoUpdate:true);
             alarm=new LimitTimer(machine.ClockSource,TicksPerSecond,this,"btAlarm",1,
                 direction:Direction.Ascending,enabled:false,workMode:WorkMode.OneShot,eventEnabled:true,autoUpdate:true);
+            // Runs inline: cores execute serially (make-resc.py), so the clock and MMIO never race.
+            // Deferring it (ScheduleAction) made activities start late and get skipped.
             alarm.LimitReached+=()=>{ lock(sync) Process(); };
         }
         public GPIO IRQ { get; }
@@ -183,7 +185,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             if(next!=ulong.MaxValue) {
                 alarm.Enabled=false;
                 alarm.Value=0;
-                alarm.Limit=Math.Max(1UL,next-now);
+                alarm.Limit=next>now ? next-now : 1UL;   // ulong: never let a past deadline underflow
                 alarm.Enabled=true;
             }
         }

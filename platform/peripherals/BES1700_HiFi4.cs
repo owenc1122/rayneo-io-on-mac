@@ -38,7 +38,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             mailbox.DspMailboxWritten += () => doorbell = true;
             timer = new LimitTimer(machine.ClockSource, 1000000, this, "hifi4", 1000, Direction.Descending,
                 enabled: true, workMode: WorkMode.Periodic, eventEnabled: true, autoUpdate: true);
-            timer.LimitReached += Tick;
+            timer.LimitReached += () => machine.ScheduleAction(TimeInterval.Empty, _ => Tick());   // off the clock-source lock
         }
 
         public long Size => 0x100;
