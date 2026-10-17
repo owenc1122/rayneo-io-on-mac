@@ -35,14 +35,32 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 direction:Direction.Ascending,enabled:true,eventEnabled:false,autoUpdate:true);
             alarm=new LimitTimer(machine.ClockSource,TicksPerSecond,this,"btAlarm",1,
                 direction:Direction.Ascending,enabled:false,workMode:WorkMode.OneShot,eventEnabled:true,autoUpdate:true);
-            // Runs inline: cores execute serially (make-resc.py), so the clock and MMIO never race.
-            // Deferring it (ScheduleAction) made activities start late and get skipped.
-            alarm.LimitReached+=()=>{ lock(sync) Process(); };
+            // Lock order: the clock source (clock.Value / alarm.*) and the NVIC (IRQ.Set) are NEVER
+            // touched while holding lock(sync) — otherwise a CPU MMIO thread (sync -> clock) and this
+            // timer callback (clock -> sync) would invert and deadlock under parallel execution.
+            // We read the clock first, do the pure data work under sync, then re-arm and raise the IRQ.
+            alarm.LimitReached+=()=>{ Tick(Now); };
+        }
+        // Do the data work for one virtual instant under sync, then schedule/raise outside it.
+        private void Tick(ulong now) {
+            ulong next; bool irq;
+            lock(sync) { next=Process(now); irq=(raw&base.ReadDoubleWord(IntCntl))!=0; }
+            Schedule(now,next);
+            IRQ.Set(irq);
+        }
+        private void Schedule(ulong now,ulong next) {
+            if(next==ulong.MaxValue) return;
+            alarm.Enabled=false;
+            alarm.Value=0;
+            alarm.Limit=next>now ? next-now : 1UL;   // ulong: never let a past deadline underflow
+            alarm.Enabled=true;
         }
         public GPIO IRQ { get; }
         public bool TraceEvents { get; set; }
 
         public override void WriteDoubleWord(long offset,uint value) {
+            ulong now=Now;                     // clock read BEFORE sync (see Tick for the lock order)
+            ulong next=ulong.MaxValue; bool irq;
             lock(sync) {
             // Stock controller initialization requests bit 31 then waits for it to clear.
             // Reset the digital control/interrupt state synchronously; preserve RF setup.
@@ -62,33 +80,37 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             if(offset==0x100 && (value&0x80000000u)!=0) {
                 // Firmware reads a 28-bit half-slot clock and a 625-step fine counter.
                 // One half-slot is 312.5 us; capture both from the same virtual instant.
-                ulong ticks=Now;
-                value=(uint)((ticks/HalfSlot)&ClockMask);
-                base.WriteDoubleWord(0x104,(uint)(HalfSlot-1-ticks%HalfSlot));
-                base.WriteDoubleWord(0x9c4,(uint)(ticks/2));
+                value=(uint)((now/HalfSlot)&ClockMask);
+                base.WriteDoubleWord(0x104,(uint)(HalfSlot-1-now%HalfSlot));
+                base.WriteDoubleWord(0x9c4,(uint)(now/2));
             }
             // +0x100 bit 30: clock adjust request; the controller polls until the hardware clears it.
             if(offset==0x100 && (value&0x40000000u)!=0) value&=~0x40000000u;
-            if(offset==IntAck) { Ack(value); Update(); return; }
-            base.WriteDoubleWord(offset,value);
-            switch(offset) {
-                case IntCntl: break;
-                case 0xec: Arm(0); break;
-                case 0xf4: Arm(1); break;
-                case 0xfc: Arm(2); break;
-                case 0x110:
-                    if((value&0x80000000u)!=0 && exchangeTable!=0) Program((int)(value&0xf));
-                    break;
+            if(offset==IntAck) { Ack(value); }
+            else {
+                base.WriteDoubleWord(offset,value);
+                switch(offset) {
+                    case IntCntl: break;
+                    case 0xec: Arm(0); break;
+                    case 0xf4: Arm(1); break;
+                    case 0xfc: Arm(2); break;
+                    case 0x110:
+                        if((value&0x80000000u)!=0 && exchangeTable!=0) Program(now,(int)(value&0xf));
+                        break;
+                }
+                next=Process(now);
             }
-            Process();
+            irq=(raw&base.ReadDoubleWord(IntCntl))!=0;
             }
+            Schedule(now,next);
+            IRQ.Set(irq);
         }
         // Core IP versions the BTC init asserts on the radio block: +0x404 = 0x0B000600, +0x804 = 0x0B001200.
         public override uint ReadDoubleWord(long offset) {
             if(offset==0x404 && versionWord!=0) return versionWord;
             if(offset==0x804 && versionWord!=0) return 0x0b001200;      // second core block version
+            if(offset==IntStat) { ulong now=Now; Tick(now); lock(sync) return raw&base.ReadDoubleWord(IntCntl); }
             lock(sync) {
-                if(offset==IntStat) { Process(); return raw&base.ReadDoubleWord(IntCntl); }
                 if(offset==0x14) return raw;
                 if(offset==FifoStat) return fifo.Count>0 ? fifo.Peek() : 0;
             }
@@ -106,14 +128,14 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             target[i]=clkn*HalfSlot+(HalfSlot-1-Math.Min(fine,HalfSlot-1));
             armed[i]=true;
         }
-        private void Program(int idx) {
+        private void Program(ulong now,int idx) {
             ulong a=exchangeTable+(ulong)idx*16;
             var bus=machine.SystemBus;
             ushort ctrl=bus.ReadWord(a);
             ulong slot=bus.ReadWord(a+2)|((ulong)(bus.ReadWord(a+4)&0xfff)<<16);
             ulong fine=Math.Min((ulong)bus.ReadWord(a+6)&0x3ff,HalfSlot-1);
             ushort dur=bus.ReadWord(a+0xa);
-            ulong start=Unwrap(slot*HalfSlot+(HalfSlot-1-fine));
+            ulong start=Unwrap(now,slot*HalfSlot+(HalfSlot-1-fine));
             ulong len=(dur&0x8000)!=0 ? (ulong)(dur&0x7fff)*HalfSlot : (ulong)dur*2;
             if(len==0) len=HalfSlot;
             SetStatus(a,1);
@@ -124,13 +146,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 ulong cs=exchangeTable+(ulong)bus.ReadWord(a+8)*8;
                 var words=new System.Text.StringBuilder();
                 if(dumped.Add(cs)) for(ulong o=0;o<0xb0;o+=2) words.AppendFormat("{0:x4} ",bus.ReadWord(cs+o));
-                this.Log(LogLevel.Info,"ET{0} mode {1} ctrl {5:x4} start {2} (now {3}) len {4}us cb {6:x} cs {7:x} {8}",idx,ctrl&7,start,Now,len/2,ctrl,cb,cs,words);
+                this.Log(LogLevel.Info,"ET{0} mode {1} ctrl {5:x4} start {2} (now {3}) len {4}us cb {6:x} cs {7:x} {8}",idx,ctrl&7,start,now,len/2,ctrl,cb,cs,words);
             }
         }
         // Clock values are 28-bit half-slot counts; place a target within half a wrap of now.
-        private ulong Unwrap(ulong ticks) {
+        private ulong Unwrap(ulong now,ulong ticks) {
             const ulong span=(ClockMask+1UL)*HalfSlot;
-            ulong now=Now, baseTicks=now-now%span;
+            ulong baseTicks=now-now%span;
             ulong t=baseTicks+ticks%span;
             if(t+span/2<now) t+=span; else if(t>now+span/2 && t>=span) t-=span;
             return t;
@@ -140,15 +162,15 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             ushort ctrl=bus.ReadWord(a);
             bus.WriteWord(a,(ushort)((ctrl&~0x38)|(st<<3)));
         }
-        // Advance timers and the activity sequencer to the current time, then re-arm the alarm.
-        private void Process() {
-            ulong now=Now;
+        // Advance the timers and the activity sequencer to `now`; return the next deadline (or MaxValue).
+        // Pure data work under lock(sync): touches no clock/alarm/NVIC (the caller does that outside sync).
+        private ulong Process(ulong now) {
             ulong next=ulong.MaxValue;
             uint mask=base.ReadDoubleWord(IntCntl);
             for(int i=0;i<3;i++) {
                 // A target fires once its interrupt is enabled (firmware writes target, acks, then enables).
                 if(!armed[i] || (mask&(1u<<(5+i)))==0) continue;
-                ulong t=Unwrap(target[i]);
+                ulong t=Unwrap(now,target[i]);
                 if(t<=now) { armed[i]=false; raw|=1u<<(5+i); }
                 else next=Math.Min(next,t);
             }
@@ -181,17 +203,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 if(running.Mode==2 && PeerPort!=0) AirExchange(ref running);
             }
             if(fifo.Count>0) raw|=FifoInt;
-            Update();
-            if(next!=ulong.MaxValue) {
-                alarm.Enabled=false;
-                alarm.Value=0;
-                alarm.Limit=next>now ? next-now : 1UL;   // ulong: never let a past deadline underflow
-                alarm.Enabled=true;
-            }
+            return next;
         }
-        private void Update() { IRQ.Set((raw&base.ReadDoubleWord(IntCntl))!=0); }
-        // The free-running counter is 32 bits wide (35 min); extend it in software.
-        private ulong Now { get { uint v=(uint)clock.Value; if(v<lastClock) clockHigh+=1UL<<32; lastClock=v; return clockHigh|v; } }
+        // The free-running counter is 32 bits wide (~35 min); extend it in software. Guarded by its own
+        // leaf lock (never nested with sync) since both the MMIO and timer threads read it outside sync.
+        private ulong Now { get { lock(clockLock) { uint v=(uint)clock.Value; if(v<lastClock) clockHigh+=1UL<<32; lastClock=v; return clockHigh|v; } } }
+        private readonly object clockLock=new object();
         private uint lastClock; private ulong clockHigh;
 
         private struct Activity { public int Index; public ulong Start; public ulong Planned; public ulong Length; public int Mode; public ulong Cs; }
