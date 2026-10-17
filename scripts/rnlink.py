@@ -211,19 +211,48 @@ class RnlinkPhone:
             msg = {}
         self.say('rnlink AiSubtitle type=%s %s' % (typ, msg))
         sid = msg.get('sid', '')
-        if typ == 1:                      # START_REQUEST -> accept, then stream a caption
-            self.tx(0x13, pb_msg(2, message=json.dumps({'sid': sid, 'code': 0, 'reason_code': 0})))
-            self.say('rnlink AiSubtitle -> START_REPLY sid=%s' % sid)
+        if typ == 1:                      # START_REQUEST -> accept (code 1), then stream a caption
+            # DomainConverter::jsonToMessage classifies by JSON KEYS, not the PbMsg type:
+            # START_REPLY needs both "code" and "final_settings". code 1 = accepted.
+            st = msg.get('settings', {})
+            reply = {'sid': sid, 'code': 1, 'text': '',
+                     'final_settings': {
+                         'mode': st.get('mode', 'classic'),
+                         'source_language': st.get('source_language', 'en-US'),
+                         'target_language': st.get('target_language', 'zh-CN'),
+                         'save_audio': st.get('save_audio', False),
+                         'direction': st.get('direction', 'ahead')}}
+            self.tx(0x13, pb_msg(2, message=json.dumps(reply)))
+            self.say('rnlink AiSubtitle -> START_REPLY (accept) sid=%s' % sid)
             self.caption_sid = sid
-            self.push_caption('Hello from the virtual phone.', '来自虚拟手机的字幕')
-        elif typ == 7:                    # SETTINGS_SYNC_REQUEST -> empty reply
-            self.tx(0x13, pb_msg(8, message=json.dumps({'sid': sid, 'code': 0})))
+            # Stream a short scripted transcript; re-pushed on each weather tick so a caption is
+            # always freshly on-screen when a frame is captured (a real session streams continuously).
+            self.caption_lines = [
+                ('Hello from the virtual phone.', '来自虚拟手机的字幕'),
+                ('Live captions are working now.', '实时字幕现在可以用了'),
+                ('This text comes over Bluetooth.', '这段文字通过蓝牙传来'),
+            ]
+            self.caption_idx = 0
+            self.caption_seq = 1
+            self.caption_tick = 0
+            # mode 2 = bilingual (source + translation both shown); status 1 = ongoing, so the
+            # caption stays on screen (status 2 is "final" and reverts the view to listening).
+            self.push_caption(*self.caption_lines[0], seq=self.caption_seq, mode=2, status=1)
+        elif typ == 7:                    # SETTINGS_SYNC_REQUEST -> reply (code + effective_config)
+            self.tx(0x13, pb_msg(8, message=json.dumps({'sid': sid, 'code': 0, 'effective_config': {}})))
 
-    def push_caption(self, src, dst='', seq=0):
+    def push_caption(self, src, dst='', seq=0, mode=2, status=1):
         import json
+        # DISPLAY_TEXT is classified by keys "mode"+"status"; the text lives in the nested
+        # "content" object (source_transcript / target_translation). "mode" is the translationMode
+        # the view switches on (0 = Unknown -> reverts to listening); bilingual/transcription.
+        # status: 1 = partial/ongoing (keeps the caption on screen), 2 = final.
         sid = getattr(self, 'caption_sid', '')
-        self.say('rnlink AiSubtitle -> DISPLAY_TEXT %r / %r' % (src, dst))
-        self.tx(0x13, pb_msg(5, message=json.dumps({'sid': sid, 'src': src, 'dst': dst}), sequence=seq))
+        msg = {'sid': sid, 'mode': mode, 'status': status,
+               'content': {'source_transcript': src, 'target_translation': dst,
+                           'speaker_label': '', 'label': ''}}
+        self.say('rnlink AiSubtitle -> DISPLAY_TEXT mode=%s status=%s %r / %r' % (mode, status, src, dst))
+        self.tx(0x13, pb_msg(5, message=json.dumps(msg), sequence=seq))
 
     def on_feature(self, business, payload):
         pb = pb_decode(payload)
@@ -246,6 +275,17 @@ class RnlinkPhone:
             self.tx(0x0f, pb_msg(typ or 6, message=payload_json))
         if 'current_weather_request' in text or 'current_weather' in text:
             self.push_weather()
+            # Piggyback the caption stream on this frequent tick so it stays on-screen.
+            if getattr(self, 'caption_lines', None):
+                # Advance to the next distinct line every ~8 weather ticks (a few seconds apart);
+                # push each line once so the caption reads cleanly instead of accumulating repeats.
+                self.caption_tick += 1
+                if self.caption_tick % 8 == 0:
+                    if self.caption_idx < len(self.caption_lines) - 1:
+                        self.caption_idx += 1
+                    self.caption_seq += 1
+                    self.push_caption(*self.caption_lines[self.caption_idx],
+                                      seq=self.caption_seq, mode=2, status=1)
 
     # ---- phone-driven features ----
     def push_weather(self, temp=23, location='Shanghai', icon=1):
