@@ -1,0 +1,9 @@
+# Virtual phone over BLE rnlink. Run with scripts/ble-peer.py listening first and a matching bond:
+#   python3 scripts/ble-peer.py --port 23600 --log peer.log &
+#   BOND_ADDR=c0:c0:ff:ee:00:01 BOND_OS=android \
+#     scripts/emulate.sh <fw> 100 <out> "$PWD/Tests/scenarios/ble-peer.resc" (append to that .resc, or use PeerPort)
+# Expect in boot.log: "handle_rnlink_anth_msg_req auth success." and
+#   "dump conn state: rnlink:1, ble acl:1, ... gatt:1"; the home screen drops the
+#   「请将眼镜连接至手机 App」 card. Captures the home screen after the handshake.
+emulation RunFor "40"
+lcdc SaveFrame @OUT/shot-bt-phone-home.pgm

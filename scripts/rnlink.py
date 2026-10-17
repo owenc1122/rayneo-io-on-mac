@@ -81,6 +81,62 @@ def rnlink_msg(cmd, data):
     return bytes([cmd]) + struct.pack('>H', len(data)) + data
 
 
+# ---- PbMsg (protobuf) used by the feature businesses (LAUNCHER_CMD 0xf, etc.) -------------------
+# message PbMsg { uint32 version=1; uint32 type=2; string message=3; bytes data=4; uint32 sequence=5;
+#                 uint32 mode=6; }  (see rnlink-proto/nopkg.proto)
+def _pb_varint(buf, i):
+    v = s = 0
+    while True:
+        b = buf[i]; v |= (b & 0x7f) << s; s += 7; i += 1
+        if not b & 0x80:
+            return v, i
+
+def pb_decode(buf):
+    out = {}
+    i = 0
+    while i < len(buf):
+        key, i = _pb_varint(buf, i)
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            out[field], i = _pb_varint(buf, i)
+        elif wire == 2:
+            ln, i = _pb_varint(buf, i); out[field] = buf[i:i + ln]; i += ln
+        else:
+            break
+    return out
+
+def pb_encode(fields):
+    """fields: {num: int|bytes|str}. ints -> varint (wire 0), bytes/str -> length-delimited (wire 2)."""
+    out = b''
+    for num, val in fields.items():
+        if isinstance(val, int):
+            out += bytes([num << 3]) + _enc_varint(val)
+        else:
+            v = val.encode() if isinstance(val, str) else val
+            out += bytes([(num << 3) | 2]) + _enc_varint(len(v)) + v
+    return out
+
+def _enc_varint(v):
+    out = b''
+    while True:
+        b = v & 0x7f; v >>= 7
+        out += bytes([b | (0x80 if v else 0)])
+        if not v:
+            return out
+
+def pb_msg(type_, message=None, data=None, sequence=None, mode=None):
+    f = {1: 1, 2: type_}
+    if message is not None:
+        f[3] = message
+    if data is not None:
+        f[4] = data
+    if sequence is not None:
+        f[5] = sequence
+    if mode is not None:
+        f[6] = mode
+    return pb_encode(f)
+
+
 class RnlinkPhone:
     """Phone-side rnlink logic: completes the dev-info + auth handshake, then services features.
 
@@ -93,6 +149,7 @@ class RnlinkPhone:
         self.dev_info_done = False
         self.authed = False
         self.rand = bytes.fromhex('a5b4c3d2')
+        self.glasses_dev_addr = b''
 
     # ---- outbound ----
     def tx(self, business, payload, ctrl=0):
@@ -115,8 +172,9 @@ class RnlinkPhone:
         return hashlib.sha256(rand + PHONE_ADDR + local_addr + AUTH_KEY).digest()
 
     def send_auth(self):
-        # local_addr = glasses address as the firmware hashes it (swap order TBD; try adva-as-sent first).
-        local = self.central.glasses_addr[::-1]          # == adva bytes (little-endian on the wire)
+        # local_addr = the glasses BLE address exactly as the firmware hashes it. The glasses report
+        # that byte order in their dev-info reply (tag 0x11), which equals central.glasses_addr.
+        local = self.glasses_dev_addr or self.central.glasses_addr
         h = self.auth_hash(self.rand, local)
         self.say('rnlink -> auth (cmd 0x18) rand=%s hash=%s local=%s' % (
             self.rand.hex(), h.hex(), local.hex()))
@@ -131,14 +189,38 @@ class RnlinkPhone:
         bn = BUSINESS.get(business, '0x%02x' % business)
         self.say('rnlink <- %s ctrl=%d flags=%x %s%s' % (
             bn, ctrl, flags, payload.hex(), '' if crc_ok else ' CRC-BAD'))
+        if not crc_ok:
+            return                              # skip fragmented/partial frames for now
         if business == 0x10 and len(payload) >= 3:
             cmd = payload[0]; data = payload[3:]
             self.on_rnlink_cmd(cmd, data)
+        elif business in (0x0f, 0x0e, 0x0d, 0x0c, 0x18):
+            self.on_feature(business, payload)
+
+    def on_feature(self, business, payload):
+        pb = pb_decode(payload)
+        typ = pb.get(2)
+        msg = pb.get(3, b'')
+        try:
+            text = msg.decode()
+        except Exception:
+            text = msg.hex()
+        self.say('rnlink %s type=%s msg=%s' % (BUSINESS.get(business, hex(business)), typ, text))
+        # Answer the glasses' time request with the current wall-clock + timezone.
+        if business == 0x0f and 'sync_time' in text:
+            import json, time as _t
+            off = -_t.timezone if not _t.daylight else -_t.altzone
+            payload_json = json.dumps({'cmd': 'sync_time', 'payload': {
+                'utc': int(_t.time()), 'offset': off, 'timezone': 'Asia/Shanghai'}})
+            self.say('rnlink -> sync_time reply %s' % payload_json)
+            self.tx(0x0f, pb_msg(typ or 6, message=payload_json))
 
     def on_rnlink_cmd(self, cmd, data):
         if cmd == 0x11:                        # glasses dev-info reply
             info = {tag: val for tag, val in tlv_iter(data)}
             self.say('rnlink glasses dev-info %s' % {hex(t): v.hex() for t, v in info.items()})
+            if 0x11 in info and len(info[0x11]) == 6:
+                self.glasses_dev_addr = info[0x11]
             self.dev_info_done = True
             self.send_auth()
         elif cmd == 0x18:                      # glasses auth reply (success)
