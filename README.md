@@ -100,6 +100,8 @@ DSP 的录音管线要 5 路（chmap 0x3d000：左、右、右 2、前、骨传�
 - **虚拟手机（BLE 链路层）**：`scripts/ble-peer.py` 作为中心设备，通过基带模型的空口桥（`btcRadio PeerPort`，交换内存 RX/TX 描述符 + 活动 FIFO 收发帧中断）连接原固件：CONNECT_IND 被接受，主机报告 LE ACL/GATT 已连接，LL 版本/特性/长度过程完成，ATT MTU 247，发现 GATT 数据库（GAP、GATT、RayNeo 服务 0xB81D：通知特征 `7db3e235…`、写特征 `ea8b70d5…`/`ea8b60c5…`），订阅后眼镜通过 0x8002 主动发出 rnlink 帧（`aa55…`）。
 - **录音（麦克风 → 原固件）**：主页双击表冠（画面「正在唤醒 RayNeo AI」），原固件的 `AudioAdapter::startMfiWakeupPreroll` 打开语音预录（smf 流 arec2，要求 Opus 32 kbps / 60 ms）；替身把 `MIC` 指定的 WAV 编码成 Opus 送入共享内存队列，AP 日志出现 `rayneo-record-sock:record-start-success` 并持续读帧、无溢出。`scripts/check-audio.py` 把 AP 收到的 91 个 Opus 包解码回 WAV，与输入的相关系数 0.97（`tests/scenarios/record.txt`）。
 - **播放（原固件 → 扬声器）**：无手机时原固件的本地提示音是空实现（`rayneo_audio_local_music_play` 只打日志），播放来自手机 TTS/音乐/通话。离线可用的原厂路径是 AP 控制台的 `mediatool` 工厂扬声器测试：`fspeakerstart 2` 播放固件内嵌的 MP3（`buff://0x182a5a6a_11472.mp3`），经 AP 解复用 → aplay1 共享内存队列 → 替身解码，`speaker.raw` 得到 2.5 秒满幅 1 kHz 正弦（`tests/scenarios/speaker.txt`）。
+- **语音唤醒「小雷小雷」**（`VOICE_WAKE=1`）：BTH 原厂 VAD/唤醒库在模拟 codec 上真实运行（`vad demo start`），听到 Mac 输入的「小雷小雷，今天天气怎么样」后发 `bth vad ready`，替身第二级确认（hifi 事件 4），固件走离线分支（`OfflineState ... fast wakeup, ios launch app`）（`Tests/scenarios/wake.txt`）；「小李小李」「今天天气怎么样」「晓蕾在哪里」「小米小米」不触发（`wake-negative.txt`）；带背景噪声同样通过。实时输入（`scripts/live-mic-feed.py` 代替 Mac 麦克风按真实时间写入）：运行 9 分钟后说出的唤醒词立即送达模拟麦克风（已丢弃 464 秒静音），约 1 秒模拟时间内两级都触发。
+- **Mac 应用里的声音**：麦克风授权后 `mic.raw` 以 16 kHz 实时增长并送入原固件（环境声 rms≈1000，延迟上限 4 秒）；工厂扬声器测试的 1 kHz 音在 Mac 扬声器上连续播完（`speaker.played` 两段缓冲按时长首尾相接）。
 - **Mac 应用**：窗口显示原固件画面，空格按住=按表冠、滚轮/方向键=旋转；退出时保存 NOR+NAND，下次启动恢复（设置、配对、文件保留）；「恢复出厂设置」清除。固件选择后复制到应用数据目录，避免访问「文稿」触发系统授权弹窗。
 
 ## 未完成 / 与真机仍有差异
