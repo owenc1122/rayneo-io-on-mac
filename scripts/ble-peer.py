@@ -44,6 +44,7 @@ class Central:
         self.write_handle = -1
         self.rn_buf = b''               # rnlink GATT reassembly (glasses -> phone)
         self.rn = None                  # RnlinkPhone, attached by main()
+        self.log_raw = False            # dump raw notify chunks (debug)
         self.glasses_addr = b''
 
     def say(self, *a):
@@ -224,17 +225,34 @@ class Central:
         self.gatt_step = 'follow'
 
     # ---- rnlink transport ----------------------------------------------------------------------
+    # The glasses interleave GATT notifications: a complete small frame can arrive between the start
+    # and the continuation notifications of a larger frame. Continuation notifications never begin with
+    # 0xaa55 (the payload is protobuf/JSON, bytes < 0x80), so a notification that starts with aa55 is a
+    # new frame (complete, or the start of a multi-notification one) and one that does not is a
+    # continuation of the pending multi-notification frame.
     def on_rnlink_chunk(self, data):
-        self.rn_buf += data
-        while len(self.rn_buf) >= 6 and self.rn_buf[0] == 0xaa and self.rn_buf[1] == 0x55:
-            ln = (self.rn_buf[2] << 8) | self.rn_buf[3]
-            if len(self.rn_buf) < ln + 6:
-                break
-            frame, self.rn_buf = self.rn_buf[:ln + 6], self.rn_buf[ln + 6:]
-            if self.rn:
-                self.rn.on_frame(frame)
-        if self.rn_buf and self.rn_buf[0] != 0xaa:
-            self.say('rnlink resync, dropping %s' % self.rn_buf.hex()); self.rn_buf = b''
+        if self.log_raw:
+            self.say('raw chunk len=%d %s' % (len(data), data.hex()))
+        if data[:2] != b'\xaa\x55' and self.rn_buf:          # continuation of the pending big frame
+            self.rn_buf += data
+            total = ((self.rn_buf[2] << 8) | self.rn_buf[3]) + 6
+            if len(self.rn_buf) >= total:
+                frame, self.rn_buf = self.rn_buf[:total], b''
+                self._deliver(frame)
+            return
+        buf = data
+        while len(buf) >= 6 and buf[0] == 0xaa and buf[1] == 0x55:
+            total = ((buf[2] << 8) | buf[3]) + 6
+            if len(buf) >= total:
+                self._deliver(buf[:total]); buf = buf[total:]
+            else:
+                self.rn_buf = buf; return                     # start of a multi-notification frame
+        if buf:
+            self.say('rnlink resync, dropping %s' % buf.hex())
+
+    def _deliver(self, frame):
+        if self.rn:
+            self.rn.on_frame(frame)
 
     def rnlink_send(self, raw):
         # Write-command (0x52, no response) the rnlink frame to the glasses in <=(mtu-3)-byte chunks;
@@ -282,6 +300,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--port', type=int, default=23600)
     ap.add_argument('--log', default='-')
+    ap.add_argument('--raw', action='store_true')
     a = ap.parse_args()
     log = sys.stdout if a.log == '-' else open(a.log, 'a')
     srv = socket.socket()
@@ -296,6 +315,7 @@ def main():
         conn, _ = srv.accept()
         f = conn.makefile('rw', newline='\n')
         c.__init__(log); c.rn = rnlink.RnlinkPhone(c.say, c.rnlink_send, c)   # fresh per model session
+        c.log_raw = a.raw
         c.say('emulator connected')
         for line in f:
             w = line.split()
