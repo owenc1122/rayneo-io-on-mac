@@ -147,6 +147,8 @@ class RnlinkPhone:
         import os
         self.say, self.send, self.central = say, send, central
         self.notif_demo = bool(os.environ.get('NOTIF_DEMO'))
+        self.record_demo = bool(os.environ.get('RECORD_DEMO'))
+        self.settings_demo = bool(os.environ.get('SETTINGS_DEMO'))
         self.started = False
         self.dev_info_done = False
         self.authed = False
@@ -300,7 +302,17 @@ class RnlinkPhone:
         # DOMAIN answer (handleDomainMessage schema): "answer" is a NESTED object {text, isFinal};
         # the glasses read answer.text / answer.isFinal and render it via dispatchNlpTextAction.
         # sid + round tie it to the session.
-        sid = 'standin-sid-1'
+        self.assist_sid = 'standin-sid-1'
+        self.assist_text = answer
+        self.send_assist_answer()
+        # Re-send the answer on the next few connection events: on a fast emulator the first DOMAIN
+        # can race the Listening->Processing transition and be dropped before ChatDomain is ready.
+        self.assist_resend = 4
+
+    def send_assist_answer(self):
+        import json
+        sid, answer = self.assist_sid, self.assist_text
+        self.tx(0x0d, pb_msg(self.ASSIST_STATE, message=json.dumps({'rc': 3})))   # ensure Processing
         self.tx(0x0d, pb_msg(self.ASSIST_DOMAIN, message=json.dumps(
             {'domain': 'chat', 'intent': 'chat', 'sid': sid, 'round': 1,
              'answer': {'text': answer, 'isFinal': True}})))
@@ -329,6 +341,11 @@ class RnlinkPhone:
             self.tx(0x0f, pb_msg(typ or 6, message=payload_json))
         if 'current_weather_request' in text or 'current_weather' in text:
             self.push_weather()
+            # Re-send the assistant answer a few times (spaced by connection events) so it lands after
+            # the glasses have fully entered ProcessingState, even on a fast emulator.
+            if getattr(self, 'assist_resend', 0) > 0:
+                self.assist_resend -= 1
+                self.send_assist_answer()
             # Keep a notification banner continuously on screen: push a fresh notification (new UID,
             # so it is not de-duplicated) every few connection events. Event-driven, NOT wall-clock,
             # so a banner is always on screen when a frame is captured, regardless of emulator speed.
@@ -362,6 +379,30 @@ class RnlinkPhone:
         self.say('rnlink -> weather %s' % msg)
         self.tx(0x0f, pb_msg(0x12, message=msg))
 
+    def push_general_setting(self, cmd, value=0, mode=0, data=''):
+        import json
+        # GeneralSetting = LAUNCHER_CMD (0x0f) PbMsg type 5 -> RnLinkMsgProcessor::handleGeneralSettingCommand.
+        # JSON {cmd, payload:{value, mode, data}}; data is a nested JSON string. Sub-commands: crown_config,
+        # head_gestures, wakeup_config, display_config, auto_lock_time, device_name_change, ...
+        if not isinstance(data, str):
+            data = json.dumps(data)
+        msg = json.dumps({'cmd': cmd, 'payload': {'value': value, 'mode': mode, 'data': data}})
+        self.say('rnlink -> GeneralSetting %s' % msg)
+        self.tx(0x0f, pb_msg(5, message=msg))
+
+    def set_crown_config(self, double=0, long_press=1, direction=1):
+        # crown_config: payload.value=direction, data.double / data.longPress. The double-click action
+        # maps via InputEventMonitor::handleQuickLaunch: 0 assistant, 2 focus mode, 3 start recording, ...
+        self.push_general_setting('crown_config', value=direction,
+                                  data={'double': double, 'longPress': long_press})
+
+    def set_wakeup_config(self, headup=1, headup_degree=20, crown=1):
+        # wakeup_config -> SysStateMonitor::setWakeupConfig: headup_switch enables head-up (raise-to-wake)
+        # via the IMU; headup_degree is the pitch threshold; crown_switch enables crown wake.
+        self.push_general_setting('wakeup_config',
+                                  data={'headup_switch': headup, 'headup_degree': headup_degree,
+                                        'crown_switch': crown})
+
     def on_rnlink_cmd(self, cmd, data):
         if cmd == 0x11:                        # glasses dev-info reply
             info = {tag: val for tag, val in tlv_iter(data)}
@@ -379,6 +420,13 @@ class RnlinkPhone:
                 # voice assistant as available (otherwise it shows "连接手机 App 后重试").
                 import json as _j
                 self.tx(0x0d, pb_msg(31, message=_j.dumps({'major': 5, 'minor': 0})))
+                if getattr(self, 'record_demo', False):
+                    # Bind the crown double-click to "start recording" (action 3) so a double-click
+                    # starts an on-glasses recording (default double-click is the AI assistant).
+                    self.set_crown_config(double=3)
+                if getattr(self, 'settings_demo', False):
+                    # Settings sync (phone -> glasses): enable head-up (raise-to-wake) via wakeup_config.
+                    self.set_wakeup_config(headup=1, headup_degree=20, crown=1)
                 if getattr(self, 'notif_demo', False):
                     # Notification channel = business 0x15; "type" 1 = add/display (2 remove, 3 update).
                     self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',

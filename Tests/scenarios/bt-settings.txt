@@ -1,0 +1,14 @@
+# Settings sync: the phone enables head-up (raise-to-wake) via wakeup_config. Then crown-wake, let the
+# screen auto-off, look down and raise the head -> the screen wakes from head-up. Duration covers connect.
+gpio0 Pulse 1 false 120
+emulation RunFor "1"
+gpio0 Pulse 1 false 1300
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-s0-awake.pgm
+emulation RunFor "26"
+lcdc SaveFrame @OUT/shot-s1-off.pgm
+headMotion Pose -30 0
+emulation RunFor "2"
+headMotion Pose 25 0
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-s2-headup.pgm
