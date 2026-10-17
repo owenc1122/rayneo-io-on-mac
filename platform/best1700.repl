@@ -113,6 +113,7 @@ sysCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40000000
     // AP<->M55C1: both cfgs list rx 0x58,0x59 / tx 0x5b,0x5c
     CoreOneToAPRx0 -> nvic@88
     CoreOneToAPRx1 -> nvic@89
+    CoreOneSleepToAP -> nvic@90
     CoreOneToAPTx0 -> nvic@91
     CoreOneToAPTx1 -> nvic@92
     APToCoreOneRx0 -> c1Nvic@88
@@ -133,6 +134,11 @@ sysCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40000000
     CoreOneBTTransmit2 -> c1Nvic@29
     CoreOneBTTransmit3 -> c1Nvic@30
     coreOneCpu: c1
+
+// Internal codec (ADC2 feeds the BTH always-on VAD through bthDma1 request 6, see BES1700_Codec.cs).
+codec: Miscellaneous.BES1700_Codec @ sysbus 0x50300000
+    audio: hifi4
+    dma: bthDma1
 
 // HiFi4 audio DSP stand-in (see BES1700_HiFi4.cs). The window only exposes debug counters.
 hifi4: Miscellaneous.BES1700_HiFi4 @ sysbus 0x4fff0000
@@ -155,6 +161,7 @@ uart: UART.BES1700_UART @ sysbus 0x4000b000
     // lets scenarios type at the AP NSH (ap>) with `uart WriteLine "..."`.
     dma: dma
     Interrupt -> nvic@55
+    RxLine -> gpio0@18
 
 dwt: Miscellaneous.DWT @ sysbus 0xe0001000
     frequency: 240000000
@@ -229,7 +236,8 @@ btcBleExchange: Memory.MappedMemory @ sysbus 0x6d070000
 // I2C3 = 26/27, I2C4 SCL = 3), which the BTH I2C bus-recovery check samples before transfers.
 // Bit 17 = IMU INT1 (BTH board_lsm6dso32_attach: GPIO_PIN2_1, falling edge), idle high.
 gpio0: GPIOPort.BES1700_GPIO @ sysbus 0x40081000
-    pullUps: 0xcc02000a
+    // bit 18: UART0 RX (idle high)
+    pullUps: 0xcc06000a
 
 // GPIO1 also carries I2C0 pins 46/47 (bits 14/15, used by the BTH I2C1 bus recovery check): pulled up.
 gpio1: GPIOPort.BES1700_GPIO @ sysbus 0x40089000
@@ -343,3 +351,9 @@ c1: CPU.CortexM @ sysbus
 c1Nvic: IRQControllers.BES1700_PPBExemptNVIC @ sysbus new Bus.BusPointRegistration { address: 0xe000e000; cpu: c1 }
     systickFrequency: 16384
     IRQ -> c1@0
+
+// M55C1 HAL hwtimer block (hal_timer bases table of nuttx_apc1: 0x40084000). Sub-timer 1 is its
+// sleep wakeup timer (hal_cmu_lpu_sleep_cp programs it before the deep WFI; stop clears ICER1 bit 29).
+hwTimer2: Timers.BES1700_SP804 @ sysbus 0x40084000
+    frequency: 16384
+    IRQ1 -> c1Nvic@61

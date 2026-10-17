@@ -1,0 +1,12 @@
+# Voice wake must not trigger on confusable speech (VOICE_WAKE=1 MIC=.local/test-audio/confusables.wav
+# MIC_LOOP=0; scripts/make-test-audio.sh and scripts/make-kws-templates.sh create the inputs).
+# At boot the firmware's own KWS open loses a race with mediad (it waits 1 s for M55C1's smf, which that image
+# never starts) and stays closed until an assistant interaction; the double click re-opens it, as on the glasses.
+# Expect: "vad demo start" but no "bth vad ready notify" and no "hifi event 4".
+gpio0 Pulse 1 false 120
+emulation RunFor "0.15"
+gpio0 Pulse 1 false 120
+emulation RunFor "10"
+hifi4 MicRestart
+emulation RunFor "14"
+lcdc SaveFrame @OUT/shot-wake.pgm

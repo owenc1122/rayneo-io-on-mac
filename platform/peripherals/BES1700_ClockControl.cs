@@ -29,9 +29,20 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             if(!alwaysOn && (offset==0x140 || offset==0x144)) {
                 lock(ipcLock) return offset==0x140?(apRxMask<<8)|(apTxMask<<12)|(btToAp<<24)|(apAck<<28):0;
             }
-            if(offset == (alwaysOn ? 0x50 : 0x288)) return (uint)counter.Value;
+            if(offset == (alwaysOn ? 0x50 : 0x288)) {
+                uint now=(uint)counter.Value;
+                if(alwaysOn && PollHalt) Poll(now);
+                return now;
+            }
             if(!alwaysOn && (offset==0xec || offset==0x224 || offset==0x1f4)) return ReadHostIPC(offset);
             if(!alwaysOn && offset==0x90) lock(ipcLock) return ReadCoreOneIPC();
+            // AON +0: chip ID, the part number in hex (1700 = 0x6a4). The BTH dynamic loader only loads algorithm
+            // libraries (pil_algo_vad_demo) when (id & 0xfff0) is a known BES part ({0x640, 0x6a0, 0x7d0, ...}).
+            if(alwaysOn && offset==0) return ChipId;
+            // LPU control (+0x8c): hal_cmu_sys_lpu_init writes 0x20/0x60, and hal_cmu_lpu_busy
+            // (AP and M55C1) treats (value & 0xa0) == 0x20 as busy, i.e. bit 7 is the unit's ready
+            // status. Without it the AP's hal_sleep_proc never reaches WFI and spins at full speed.
+            if(!alwaysOn && offset==0x8c) return (registers.TryGetValue(offset, out var lpu) ? lpu : 0) | 0x80;
             long firstLock = alwaysOn ? 0x100 : 0xc0;
             int lockCount = alwaysOn ? 16 : 8;
             if(offset >= firstLock && offset < firstLock + lockCount*4) {
@@ -96,6 +107,53 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             // hal_cmu_sys_module_init additionally polls ACK bit 27 for request bit 26.
             if(!alwaysOn && offset == 0x1a0) registers[0x1ac] = value | ((value & 0x04000000u) << 1);
         }
+        // Busy-wait on the 16384 Hz AON counter (hal_sys_timer_delay_in_sleep: hal_timer_common_reload waits
+        // two ticks on every OS timer reprogram) spins ~4000 loop iterations per tick, each one a model read.
+        // A CPU that re-reads an unchanged value in a tight loop is halted for a quarter tick instead; the
+        // loop still sees the counter advance at the same virtual times.
+        public bool PollHalt { get; set; } = true;
+        private void Poll(uint value) {
+            if(!machine.SystemBus.TryGetCurrentCPU(out var current) || !(current is TranslationCPU cpu)) return;
+            ulong executed=cpu.ExecutedInstructions;
+            int n=0;
+            if(polls.TryGetValue(cpu,out var last) && last.Value==value && executed-last.Executed<64) n=last.Count+1;
+            if(n>=4) {
+                polls[cpu]=new PollState{Value=value,Executed=executed,Count=0};
+                cpu.IsHalted=true;
+                machine.ScheduleAction(TimeInterval.FromMicroseconds(15),_=>cpu.IsHalted=false);
+                return;
+            }
+            polls[cpu]=new PollState{Value=value,Executed=executed,Count=n};
+        }
+        private struct PollState {public uint Value; public ulong Executed; public int Count;}
+        private readonly Dictionary<TranslationCPU,PollState> polls=new Dictionary<TranslationCPU,PollState>();
+        // Host pacing (aonCmu RealTime true, set by make-resc.py for the Mac app): with the cores idling in
+        // WFI the emulation runs faster than real time, which would speed up the UI, the clock and the live
+        // microphone timeline. A 100 Hz virtual tick sleeps the emulation thread while virtual time is ahead
+        // of host time. After a stall (more than 100 ms behind) the reference restarts instead of racing
+        // to catch up.
+        public bool RealTime {
+            get { return pacer != null; }
+            set {
+                if(value == (pacer != null)) return;
+                if(!value) { pacer.Enabled = false; pacer = null; return; }
+                pacer = new LimitTimer(machine.ClockSource, 1000, this, "pacer", 10, direction: Direction.Ascending,
+                    enabled: false, workMode: WorkMode.Periodic, eventEnabled: true);
+                pacer.LimitReached += Pace;
+                paceWatch = null;
+                pacer.Enabled = true;
+            }
+        }
+        private void Pace() {
+            double now = machine.ElapsedVirtualTime.TimeElapsed.TotalSeconds;
+            if(paceWatch == null) { paceWatch = System.Diagnostics.Stopwatch.StartNew(); paceVirtual = now; return; }
+            double ahead = (now - paceVirtual) - paceWatch.Elapsed.TotalSeconds;
+            if(ahead > 0.001) System.Threading.Thread.Sleep((int)(ahead * 1000));
+            else if(ahead < -0.1) { paceWatch.Restart(); paceVirtual = now; }
+        }
+        private LimitTimer pacer;
+        private System.Diagnostics.Stopwatch paceWatch;
+        private double paceVirtual;
         // AP and BTC exchange actual shared-memory descriptors. These registers only
         // route request/acknowledgement lines; they never fabricate HCI payloads.
         public uint ReadBluetoothIPC(long offset) {
@@ -205,6 +263,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             }
             for(int i=0;i<2;i++) { c2aRx[i].Set(levels[16+i]); c2aTx[i].Set(levels[18+i]); a2cRx[i].Set(levels[20+i]); a2cTx[i].Set(levels[22+i]); }
             uint dsp; lock(ipcLock) dsp=coreOneMailbox;
+            c2aRx[2].Set((dsp&(1u<<23))!=0);
             for(int i=0;i<2;i++) { d2aRx[i].Set((dsp&(1u<<(9+i)))!=0); d2aTx[i].Set((dsp&(1u<<(6+i)))!=0); }
         }
         public GPIO LaneARx0=>laneARx[0]; public GPIO LaneARx1=>laneARx[1]; public GPIO LaneARx2=>laneARx[2]; public GPIO LaneARx3=>laneARx[3];
@@ -234,10 +293,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         public void DspSet(uint bits) { lock(ipcLock) coreOneMailbox|=bits&0x7ffu; UpdateIPC(); }
         public void DspClear(uint bits) { lock(ipcLock) coreOneMailbox&=~(bits&0x7ffu); UpdateIPC(); }
         public GPIO CoreOneToAPRx0=>c2aRx[0]; public GPIO CoreOneToAPRx1=>c2aRx[1];
+        // Channel 2 (bit 23) is the M55C1 sleep signal: hal_cmu_lpu_sleep_cp sets it before its deep WFI
+        // and waits for the AP's m55c1_sleep_handler (IRQ 90) to clear it.
+        public GPIO CoreOneSleepToAP=>c2aRx[2];
         public GPIO CoreOneToAPTx0=>c2aTx[0]; public GPIO CoreOneToAPTx1=>c2aTx[1];
         public GPIO APToCoreOneRx0=>a2cRx[0]; public GPIO APToCoreOneRx1=>a2cRx[1];
         public GPIO APToCoreOneTx0=>a2cTx[0]; public GPIO APToCoreOneTx1=>a2cTx[1];
-        private readonly GPIO[] c2aRx=Lines(2), c2aTx=Lines(2), a2cRx=Lines(2), a2cTx=Lines(2);
+        private readonly GPIO[] c2aRx=Lines(3), c2aTx=Lines(2), a2cRx=Lines(2), a2cTx=Lines(2);
         private uint coreOneMailbox;
         private uint ReadCoreOneIPC() { return coreOneMailbox; }
         private void WriteCoreOneIPC(long offset,uint value) {
@@ -271,6 +333,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private readonly object ipcLock=new object();
         private uint apToBt,btToAp,apAck,btAck,apRxMask,apTxMask,btRxMask,btTxMask;
         public void Reset() { apToBt=btToAp=apAck=btAck=apRxMask=apTxMask=btRxMask=btTxMask=0;apReq=apDone=apMask=bthReq=bthDone=bthMask=0;coreOneMailbox=0;UpdateIPC();registers.Clear(); Array.Clear(locks, 0, locks.Length); counter.Reset(); }
+        public uint ChipId { get; set; } = 0x6a4;
         public long Size => 0x1000;
         private readonly bool alwaysOn;
         private readonly IMachine machine;

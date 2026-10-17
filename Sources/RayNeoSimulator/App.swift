@@ -27,6 +27,9 @@ struct RayNeoApp: App {
                 Button("表冠向前旋转（↑）") { firmware.send(.rotate(1)) }
                 Button("表冠向后旋转（↓）") { firmware.send(.rotate(-1)) }
             }
+            CommandMenu("声音") {
+                Toggle("语音唤醒「小雷小雷」（手机 App 里的同名设置）", isOn: $firmware.voiceWakeup)
+            }
         }
     }
 }
