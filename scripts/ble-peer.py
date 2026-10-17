@@ -12,6 +12,8 @@ framing, ATT MTU exchange and primary-service / characteristic discovery of the 
 GATT database, and answers the glasses' own GATT client requests with "attribute not found".
 """
 import argparse, os, socket, struct, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rnlink
 
 LL_VERSION_IND, LL_UNKNOWN_RSP, LL_FEATURE_REQ, LL_FEATURE_RSP = 0x0c, 0x07, 0x08, 0x09
 LL_PERIPHERAL_FEATURE_REQ, LL_REJECT_EXT_IND, LL_LENGTH_REQ, LL_LENGTH_RSP = 0x0e, 0x11, 0x14, 0x15
@@ -38,6 +40,11 @@ class Central:
         self.events = 0
         self.followups = []
         self.last_read = 0
+        self.notify_handle = -1
+        self.write_handle = -1
+        self.rn_buf = b''               # rnlink GATT reassembly (glasses -> phone)
+        self.rn = None                  # RnlinkPhone, attached by main()
+        self.glasses_addr = b''
 
     def say(self, *a):
         print(time.strftime('%H:%M:%S'), *a, file=self.log, flush=True)
@@ -54,9 +61,12 @@ class Central:
                 continue
             self.say('ADV cs=%s adva=%s data=%s -> CONNECT_IND' % (cs, adva, data.hex()))
             self.connected_cs = cs
-            # AA, CRCInit, WinSize 2.5 ms, WinOffset 0, interval 30 ms, latency 0, timeout 3 s, all channels, hop 7
+            self.glasses_addr = bytes.fromhex(adva)[::-1]   # natural order (MSB first)
+            # AA, CRCInit, WinSize 2.5 ms, WinOffset 0, interval 30 ms, latency 0, timeout 32 s, all channels, hop 7.
+            # The emulator runs ~1/8 real time and the firmware schedules connection anchors sparsely, so a
+            # short supervision timeout drops the link (reason 8) before app data flows; use the 32 s maximum.
             ll = struct.pack('<I', 0x50654c1a) + bytes([0x55, 0x55, 0x55]) + struct.pack(
-                '<BHHHH', 2, 0, 24, 0, 300) + bytes.fromhex('ffffffff1f') + bytes([7])
+                '<BHHHH', 2, 0, 24, 0, 3200) + bytes.fromhex('ffffffff1f') + bytes([7])
             payload = CENTRAL_ADDR + bytes.fromhex(adva) + ll
             assert len(payload) == 34
             # Phone-side opening, like iOS: version exchange then ATT MTU.
@@ -178,10 +188,14 @@ class Central:
             self.say('write response')
             self.gatt_step = 'follow'
         elif op in (0x1b, 0x1d):
-            self.say('glasses %s handle 0x%04x %s' % ('notify' if op == 0x1b else 'indicate',
-                                                       struct.unpack_from('<H', pdu, 1)[0], pdu[3:].hex()))
+            h = struct.unpack_from('<H', pdu, 1)[0]
             if op == 0x1d:
                 self.send_l2cap(4, bytes([0x1e]))
+            if h == self.notify_handle:
+                self.on_rnlink_chunk(pdu[3:])
+            else:
+                self.say('glasses %s handle 0x%04x %s' % ('notify' if op == 0x1b else 'indicate',
+                                                           h, pdu[3:].hex()))
         elif op in (0x04, 0x06, 0x08, 0x0a, 0x0c, 0x10, 0x12, 0x18):   # glasses' GATT client requests
             self.say('glasses ATT request %s' % pdu.hex())
             h = struct.unpack_from('<H', pdu, 1)[0] if len(pdu) >= 3 else 0
@@ -194,11 +208,37 @@ class Central:
         self.pending_att = False
 
     def plan_follow_up(self):
-        # Read every readable value, then subscribe to notify/indicate characteristics (CCCD = value+1).
-        self.followups = [('read', vh) for h, props, vh, uuid in self.chars if props & 0x02]
-        self.followups += [('subscribe', vh + 1, 1 if props & 0x10 else 2)
-                           for h, props, vh, uuid in self.chars if props & 0x30]
+        # Identify the RayNeo rnlink characteristics (128-bit UUIDs): notify (props 0x30) and write.
+        for h, props, vh, uuid in self.chars:
+            if len(uuid) == 32 and props & 0x30:
+                self.notify_handle = vh
+            if len(uuid) == 32 and props & 0x0c:
+                self.write_handle = vh
+        # Subscribe only to the rnlink notify characteristic, then start the rnlink handshake.
+        self.followups = [('subscribe', vh + 1, 1 if props & 0x10 else 2)
+                          for h, props, vh, uuid in self.chars if len(uuid) == 32 and props & 0x30]
+        self.say('rnlink notify=0x%04x write=0x%04x glasses_addr=%s' % (
+            self.notify_handle, self.write_handle, self.glasses_addr.hex()))
         self.gatt_step = 'follow'
+
+    # ---- rnlink transport ----------------------------------------------------------------------
+    def on_rnlink_chunk(self, data):
+        self.rn_buf += data
+        while len(self.rn_buf) >= 6 and self.rn_buf[0] == 0xaa and self.rn_buf[1] == 0x55:
+            ln = (self.rn_buf[2] << 8) | self.rn_buf[3]
+            if len(self.rn_buf) < ln + 6:
+                break
+            frame, self.rn_buf = self.rn_buf[:ln + 6], self.rn_buf[ln + 6:]
+            if self.rn:
+                self.rn.on_frame(frame)
+        if self.rn_buf and self.rn_buf[0] != 0xaa:
+            self.say('rnlink resync, dropping %s' % self.rn_buf.hex()); self.rn_buf = b''
+
+    def rnlink_send(self, raw):
+        # Write (write-with-response) the rnlink frame to the glasses in <=(mtu-3)-byte chunks.
+        mtu = self.mtu - 3
+        for i in range(0, len(raw), mtu):
+            self.send_l2cap(4, bytes([0x12]) + struct.pack('<H', self.write_handle) + raw[i:i + mtu])
 
     def gatt_next(self):
         if getattr(self, 'pending_att', False):
@@ -244,6 +284,7 @@ def main():
     srv.bind(('127.0.0.1', a.port))
     srv.listen(1)
     c = Central(log)
+    c.rn = rnlink.RnlinkPhone(c.say, c.rnlink_send, c)
     c.say('waiting for the emulator on port %d' % a.port)
     conn, _ = srv.accept()
     f = conn.makefile('rw', newline='\n')
