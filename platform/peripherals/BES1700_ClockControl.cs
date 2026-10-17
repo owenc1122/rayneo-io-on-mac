@@ -31,7 +31,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             }
             if(offset == (alwaysOn ? 0x50 : 0x288)) {
                 uint now=(uint)counter.Value;
-                if(alwaysOn) Poll(now);
+                if(alwaysOn && PollHalt) Poll(now);
                 return now;
             }
             if(!alwaysOn && (offset==0xec || offset==0x224 || offset==0x1f4)) return ReadHostIPC(offset);
@@ -111,6 +111,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         // two ticks on every OS timer reprogram) spins ~4000 loop iterations per tick, each one a model read.
         // A CPU that re-reads an unchanged value in a tight loop is halted for a quarter tick instead; the
         // loop still sees the counter advance at the same virtual times.
+        public bool PollHalt { get; set; } = true;
         private void Poll(uint value) {
             if(!machine.SystemBus.TryGetCurrentCPU(out var current) || !(current is TranslationCPU cpu)) return;
             ulong executed=cpu.ExecutedInstructions;

@@ -100,7 +100,7 @@ namespace Antmicro.Renode.Peripherals.DMA
         // a word-by-word NAND->PSRAM page copy cost far more than the firmware's whole boot work.
         private void Copy(IBusController bus,ref uint src,ref uint dst,uint count,int width,bool srcInc,bool dstInc) {
             int bytes=(int)count*width;
-            bool srcMem=srcInc && IsMemory(bus,src), dstMem=dstInc && IsMemory(bus,dst);
+            bool srcMem=BlockCopy && srcInc && IsMemory(bus,src), dstMem=BlockCopy && dstInc && IsMemory(bus,dst);
             if(dstMem || srcMem) {
                 byte[] data;
                 if(srcMem) data=bus.ReadBytes(src,bytes);
@@ -135,6 +135,7 @@ namespace Antmicro.Renode.Peripherals.DMA
             if(srcInc) src+=(uint)bytes;
             if(dstInc) dst+=(uint)bytes;
         }
+        public bool BlockCopy { get; set; } = true;
         private static bool IsMemory(IBusController bus,uint address) {
             return bus.WhatIsAt(address)?.Peripheral is Antmicro.Renode.Peripherals.Memory.MappedMemory;
         }

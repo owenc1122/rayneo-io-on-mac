@@ -129,6 +129,7 @@ lines += [
     'cpu AddHook 0x0011492c """' + delay_hook('us') + '"""',
     'cpu AddHook 0x0012f450 """' + delay_hook('ns') + '"""',
 ]) + [
+] + (['dma BlockCopy false'] if __import__('os').environ.get('DMA_BLOCK') == '0' else []) + (['aonCmu PollHalt false'] if __import__('os').environ.get('AON_POLL') == '0' else []) + [
     'cpu SP 0x202fffe0',
     'cpu PC 0x10190010',
 ] + ([] if __import__('os').environ.get('HOOKS') == '0' else [

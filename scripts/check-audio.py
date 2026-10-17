@@ -41,11 +41,16 @@ def stats(x):
 
 def best_corr(a, b, maxlag):
     # Envelope-free normalised cross-correlation on a 4x decimated copy (fast enough in pure Python).
-    a = a[::4]; b = b[::4]; n = min(len(a), len(b)) - maxlag // 4
+    # Both directions: a recording can start before (MIC timeline restarted, then the capture opens later)
+    # or after the matching part of the reference. Positive lag = recording delayed against the reference.
+    a = a[::4]; b = b[::4]; m = maxlag // 4; n = min(len(a), len(b)) - m
+    if n < 200: n = min(len(a), len(b)) // 2
     if n < 200: return 0.0, 0
     best = (0.0, 0)
-    for lag in range(0, maxlag // 4, 2):
-        xs = a[lag:lag + n]; ys = b[:n]
+    for lag in range(-m, m, 2):
+        if lag >= 0: xs = a[lag:lag + n]; ys = b[:n]
+        else: xs = a[:n]; ys = b[-lag:-lag + n]
+        if len(xs) < n or len(ys) < n: continue
         sxy = sum(x * y for x, y in zip(xs, ys)); sxx = sum(x * x for x in xs); syy = sum(y * y for y in ys)
         if sxx and syy:
             c = sxy / (sxx * syy) ** 0.5
@@ -71,7 +76,7 @@ def main():
         x, rate = read_wav(out)
         print('  decoded %s: %s' % (out.name, stats(x)))
         if ref:
-            c, lag = best_corr(x, ref, 16000)
+            c, lag = best_corr(x, ref, 32000)
             print('  correlation with %s: %.2f at lag %d samples' % (Path(mic).name, c, lag))
     spk = run / 'speaker.raw'
     if spk.exists() and spk.stat().st_size:
