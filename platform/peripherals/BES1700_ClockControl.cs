@@ -100,6 +100,33 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             // hal_cmu_sys_module_init additionally polls ACK bit 27 for request bit 26.
             if(!alwaysOn && offset == 0x1a0) registers[0x1ac] = value | ((value & 0x04000000u) << 1);
         }
+        // Host pacing (aonCmu RealTime true, set by make-resc.py for the Mac app): with the cores idling in
+        // WFI the emulation runs faster than real time, which would speed up the UI, the clock and the live
+        // microphone timeline. A 100 Hz virtual tick sleeps the emulation thread while virtual time is ahead
+        // of host time. After a stall (more than 100 ms behind) the reference restarts instead of racing
+        // to catch up.
+        public bool RealTime {
+            get { return pacer != null; }
+            set {
+                if(value == (pacer != null)) return;
+                if(!value) { pacer.Enabled = false; pacer = null; return; }
+                pacer = new LimitTimer(machine.ClockSource, 1000, this, "pacer", 10, direction: Direction.Ascending,
+                    enabled: false, workMode: WorkMode.Periodic, eventEnabled: true);
+                pacer.LimitReached += Pace;
+                paceWatch = null;
+                pacer.Enabled = true;
+            }
+        }
+        private void Pace() {
+            double now = machine.ElapsedVirtualTime.TimeElapsed.TotalSeconds;
+            if(paceWatch == null) { paceWatch = System.Diagnostics.Stopwatch.StartNew(); paceVirtual = now; return; }
+            double ahead = (now - paceVirtual) - paceWatch.Elapsed.TotalSeconds;
+            if(ahead > 0.001) System.Threading.Thread.Sleep((int)(ahead * 1000));
+            else if(ahead < -0.1) { paceWatch.Restart(); paceVirtual = now; }
+        }
+        private LimitTimer pacer;
+        private System.Diagnostics.Stopwatch paceWatch;
+        private double paceVirtual;
         // AP and BTC exchange actual shared-memory descriptors. These registers only
         // route request/acknowledgement lines; they never fabricate HCI payloads.
         public uint ReadBluetoothIPC(long offset) {
