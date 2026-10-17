@@ -29,7 +29,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             if(!alwaysOn && (offset==0x140 || offset==0x144)) {
                 lock(ipcLock) return offset==0x140?(apRxMask<<8)|(apTxMask<<12)|(btToAp<<24)|(apAck<<28):0;
             }
-            if(offset == (alwaysOn ? 0x50 : 0x288)) return (uint)counter.Value;
+            if(offset == (alwaysOn ? 0x50 : 0x288)) {
+                uint now=(uint)counter.Value;
+                if(alwaysOn) Poll(now);
+                return now;
+            }
             if(!alwaysOn && (offset==0xec || offset==0x224 || offset==0x1f4)) return ReadHostIPC(offset);
             if(!alwaysOn && offset==0x90) lock(ipcLock) return ReadCoreOneIPC();
             // AON +0: chip ID, the part number in hex (1700 = 0x6a4). The BTH dynamic loader only loads algorithm
@@ -103,6 +107,25 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             // hal_cmu_sys_module_init additionally polls ACK bit 27 for request bit 26.
             if(!alwaysOn && offset == 0x1a0) registers[0x1ac] = value | ((value & 0x04000000u) << 1);
         }
+        // Busy-wait on the 16384 Hz AON counter (hal_sys_timer_delay_in_sleep: hal_timer_common_reload waits
+        // two ticks on every OS timer reprogram) spins ~4000 loop iterations per tick, each one a model read.
+        // A CPU that re-reads an unchanged value in a tight loop is halted for a quarter tick instead; the
+        // loop still sees the counter advance at the same virtual times.
+        private void Poll(uint value) {
+            if(!machine.SystemBus.TryGetCurrentCPU(out var current) || !(current is TranslationCPU cpu)) return;
+            ulong executed=cpu.ExecutedInstructions;
+            int n=0;
+            if(polls.TryGetValue(cpu,out var last) && last.Value==value && executed-last.Executed<64) n=last.Count+1;
+            if(n>=4) {
+                polls[cpu]=new PollState{Value=value,Executed=executed,Count=0};
+                cpu.IsHalted=true;
+                machine.ScheduleAction(TimeInterval.FromMicroseconds(15),_=>cpu.IsHalted=false);
+                return;
+            }
+            polls[cpu]=new PollState{Value=value,Executed=executed,Count=n};
+        }
+        private struct PollState {public uint Value; public ulong Executed; public int Count;}
+        private readonly Dictionary<TranslationCPU,PollState> polls=new Dictionary<TranslationCPU,PollState>();
         // Host pacing (aonCmu RealTime true, set by make-resc.py for the Mac app): with the cores idling in
         // WFI the emulation runs faster than real time, which would speed up the UI, the clock and the live
         // microphone timeline. A 100 Hz virtual tick sleeps the emulation thread while virtual time is ahead

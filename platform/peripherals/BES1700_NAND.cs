@@ -10,7 +10,7 @@ using Antmicro.Renode.Peripherals;
 using Antmicro.Renode.Peripherals.Bus;
 namespace Antmicro.Renode.Peripherals.SPI
 {
-    public sealed class BES1700_NAND : IDoubleWordPeripheral, IBytePeripheral, IKnownSize
+    public sealed class BES1700_NAND : IDoubleWordPeripheral, IBytePeripheral, IKnownSize, Antmicro.Renode.Peripherals.DMA.IBES1700_DmaFifo
     {
         public BES1700_NAND(IMachine machine) { RxRequest=new GPIO(); Reset(); }
         public GPIO RxRequest {get; private set;}
@@ -23,6 +23,13 @@ namespace Antmicro.Renode.Peripherals.SPI
         public byte ReadByte(long offset) {
             if(offset==0x10 || offset==8) return Pop();
             return (byte)(ReadDoubleWord(offset&~3)>>(8*(int)(offset&3)));
+        }
+        // Same bytes and side effects as 'count' bus reads of 'width' at 'offset'.
+        public void ReadFifo(long offset,byte[] data,int count,int width) {
+            for(int i=0;i<count;i++) {
+                uint value=width==4?ReadDoubleWord(offset):width==1?ReadByte(offset):(uint)(ReadByte(offset)|(ReadByte(offset)<<8));
+                for(int k=0;k<width;k++) data[i*width+k]=(byte)(value>>(8*k));
+            }
         }
         private byte Pop() {byte value=rx.Count==0?(byte)0:rx.Dequeue();if(rx.Count==0)RxRequest.Unset();return value;}
         private uint Get(long offset) {return regs.TryGetValue(offset,out var value)?value:0;}
