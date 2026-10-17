@@ -297,12 +297,13 @@ class RnlinkPhone:
         # Listening -> next state (rc 3) so the session moves past listening to show the answer.
         self.tx(0x0d, pb_msg(self.ASSIST_STATE, message=json.dumps({'rc': 3})))
         self.say('rnlink VOICE_ASSISTANT -> STATE_CHANGE answering')
-        # DOMAIN answer (handleDomainMessage schema): domain "intent" = general Q&A; answer/text with
-        # isFinal; sid+round tie it to the session.
+        # DOMAIN answer (handleDomainMessage schema): "answer" is a NESTED object {text, isFinal};
+        # the glasses read answer.text / answer.isFinal and render it via dispatchNlpTextAction.
+        # sid + round tie it to the session.
         sid = 'standin-sid-1'
         self.tx(0x0d, pb_msg(self.ASSIST_DOMAIN, message=json.dumps(
             {'domain': 'chat', 'intent': 'chat', 'sid': sid, 'round': 1,
-             'answer': answer, 'text': answer, 'isFinal': True})))
+             'answer': {'text': answer, 'isFinal': True}})))
         self.say('rnlink VOICE_ASSISTANT -> DOMAIN answer %r' % answer)
         self.tx(0x0d, pb_msg(self.ASSIST_NLP_DONE, message=json.dumps(
             {'sid': sid, 'text': answer, 'isFinal': True, 'final': True})))
