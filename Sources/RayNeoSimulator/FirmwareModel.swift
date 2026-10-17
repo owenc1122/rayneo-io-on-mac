@@ -16,6 +16,7 @@ import SwiftUI
     private var lastFrame: Data?
     private var monitor: NWConnection?
     private let monitorPort: UInt16 = 23_456
+    private var audio: AudioBridge?
 
     private static let firmwareKey = "firmwareDirectory"
     private static let fontsKey = "fontsDirectory"
@@ -226,6 +227,10 @@ import SwiftUI
             if let fonts = UserDefaults.standard.string(forKey: Self.fontsKey) { environment["FONTS"] = fonts }
             if let venv = venvDirectory { environment["RAYNEO_VENV"] = venv.path }
             if let state = stateDirectory { environment["STATE"] = state.path }
+            // Sound: the HiFi4 stand-in reads the Mac microphone from mic.raw and writes the speaker to speaker.raw.
+            let bridge = AudioBridge(runDirectory: output)
+            environment["MIC"] = bridge.micPath
+            environment["MIC_LIVE"] = "1"
             task.environment = environment
             task.standardInput = FileHandle.nullDevice
             task.standardOutput = handle; task.standardError = handle
@@ -235,6 +240,7 @@ import SwiftUI
                     guard let self else { return }
                     self.timer?.invalidate(); self.timer = nil
                     self.monitor?.cancel(); self.monitor = nil
+                    self.audio?.stop(); self.audio = nil
                     self.running = false; self.process = nil
                     if finished.terminationStatus != 0 && finished.terminationReason != .uncaughtSignal {
                         self.failure = "固件运行已中断，日志：\(output.path)"
@@ -246,6 +252,8 @@ import SwiftUI
             process = task
             try task.run()
             running = true
+            bridge.start(microphone: true)
+            audio = bridge
             timer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
                 Task { @MainActor in self?.readFrame(output.appendingPathComponent("frame.pgm")) }
             }
@@ -257,6 +265,7 @@ import SwiftUI
 
     func stop() {
         saveState()
+        audio?.stop(); audio = nil
         timer?.invalidate(); timer = nil
         monitor?.cancel(); monitor = nil
         guard let process, process.isRunning else { return }

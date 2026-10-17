@@ -204,6 +204,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 apRx[i].Set(levels[24+i]); apTx[i].Set(levels[28+i]); btRx[i].Set(levels[32+i]); btTx[i].Set(levels[36+i]);
             }
             for(int i=0;i<2;i++) { c2aRx[i].Set(levels[16+i]); c2aTx[i].Set(levels[18+i]); a2cRx[i].Set(levels[20+i]); a2cTx[i].Set(levels[22+i]); }
+            uint dsp; lock(ipcLock) dsp=coreOneMailbox;
+            for(int i=0;i<2;i++) { d2aRx[i].Set((dsp&(1u<<(9+i)))!=0); d2aTx[i].Set((dsp&(1u<<(6+i)))!=0); }
         }
         public GPIO LaneARx0=>laneARx[0]; public GPIO LaneARx1=>laneARx[1]; public GPIO LaneARx2=>laneARx[2]; public GPIO LaneARx3=>laneARx[3];
         public GPIO LaneATx0=>laneATx[0]; public GPIO LaneATx1=>laneATx[1]; public GPIO LaneATx2=>laneATx[2]; public GPIO LaneATx3=>laneATx[3];
@@ -218,7 +220,19 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         //   12+ch C1 tx consumed   (AP rx_done sets; C1 local_tx_clear clears)
         //   21+ch C1->AP pending   (C1 peer_tx sets; AP rx_resume/suspend set/clear)
         //   18+ch AP tx consumed   (C1 rx_done sets; AP local_tx_clear clears)
-        // Bits 0..10 belong to the AP<->HiFi4 DSP link (DSP not emulated): stored only.
+        // Bits 0..10 are the AP<->HiFi4 DSP link (hal_mcu2cp_*: DSP cfg 0x18299620), same scheme 12 bits lower:
+        //    3+ch AP->DSP pending  (AP peer_tx sets; DSP clears when it takes the message)
+        //    0+ch DSP tx consumed  (AP rx_done sets; DSP clears)
+        //    9+ch DSP->AP pending  (DSP peer_tx sets; AP rx_resume/suspend set/clear)  -> AP IRQ 76/77
+        //    6+ch AP tx consumed   (DSP rx_done sets; AP local_tx_clear clears)       -> AP IRQ 79/80
+        // The DSP side is BES1700_HiFi4 (DspMailbox/DspSet/DspClear).
+        public GPIO DspToAPRx0=>d2aRx[0]; public GPIO DspToAPRx1=>d2aRx[1];
+        public GPIO DspToAPTx0=>d2aTx[0]; public GPIO DspToAPTx1=>d2aTx[1];
+        private readonly GPIO[] d2aRx=Lines(2), d2aTx=Lines(2);
+        public Action DspMailboxWritten;
+        public uint DspMailbox { get { lock(ipcLock) return coreOneMailbox & 0x7ffu; } }
+        public void DspSet(uint bits) { lock(ipcLock) coreOneMailbox|=bits&0x7ffu; UpdateIPC(); }
+        public void DspClear(uint bits) { lock(ipcLock) coreOneMailbox&=~(bits&0x7ffu); UpdateIPC(); }
         public GPIO CoreOneToAPRx0=>c2aRx[0]; public GPIO CoreOneToAPRx1=>c2aRx[1];
         public GPIO CoreOneToAPTx0=>c2aTx[0]; public GPIO CoreOneToAPTx1=>c2aTx[1];
         public GPIO APToCoreOneRx0=>a2cRx[0]; public GPIO APToCoreOneRx1=>a2cRx[1];
@@ -235,6 +249,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 }
             }
             UpdateIPC();
+            if((value&0x7ffu)!=0) DspMailboxWritten?.Invoke();
         }
         // The AP<->BTC "intersys" lanes are used first by the AP (btdrv init) and then by the
         // M55C1 BT stack (same HAL, same bits); the same levels are also offered to the M55C1 NVIC.

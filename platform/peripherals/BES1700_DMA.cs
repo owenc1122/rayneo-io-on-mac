@@ -32,6 +32,31 @@ namespace Antmicro.Renode.Peripherals.DMA
             nandReady=value;
             if(value)for(int c=0;c<8;c++)if((Get(0x110+c*0x20)&1)!=0 && (Get(0x100+c*0x20)==0x40198010 || Get(0x100+c*0x20)==0x40198008))Transfer(c);
         }
+        // Peripheral-to-memory request from a device FIFO (UART RX): one byte into the enabled flow-2
+        // channel whose source is that device register. Returns false when no channel is waiting.
+        public bool PeripheralReceive(uint source, byte value) {
+            for(int c=0;c<8;c++) {
+                long b=0x100+c*0x20;
+                uint config=Get(b+16);
+                if((config&1)==0 || ((config>>11)&7)!=2 || Get(b)!=source) continue;
+                uint ctrl=Get(b+12), count=ctrl&0xfff;
+                if(count==0) continue;
+                var bus=machine.GetSystemBus(this);
+                uint dst=Get(b+4);
+                bus.WriteByte(dst,value);
+                if((ctrl&(1u<<27))!=0) regs[b+4]=dst+1;
+                regs[b+12]=(ctrl&~0xfffu)|(count-1);
+                if(count-1==0) {
+                    if((ctrl&0x80000000u)!=0) completed|=1u<<c;
+                    uint next=Get(b+8);
+                    if(next!=0) { uint a=next&~3u; for(int i=0;i<4;i++) regs[b+i*4]=bus.ReadDoubleWord(a+(uint)i*4); }
+                    else regs[b+16]=config&~1u;
+                    Update();
+                }
+                return true;
+            }
+            return false;
+        }
         private void Transfer(int channel) {
             long b=0x100+channel*0x20;
             var bus=machine.GetSystemBus(this);
