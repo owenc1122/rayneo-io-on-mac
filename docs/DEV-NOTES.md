@@ -9,7 +9,7 @@
 ## 快速使用
 
 ```sh
-# 一次性：Renode（sh scripts/get-renode.sh，需 1.17.0+20261016 或更新）；Python 工具（从 PyPI 下载 littlefs-python、fonttools）
+# 一次性：Renode（sh scripts/get-renode.sh，需 1.17.0+20261016 或更新；或 sh scripts/build-renode.sh 从源码构建同一版本加 renode-patches/ 的提速补丁，构建结果优先使用）；Python 工具（从 PyPI 下载 littlefs-python、fonttools）
 sh scripts/setup-tools.sh
 
 # 命令行运行 60 秒模拟时间，日志与画面写到 .local/runs/demo/
@@ -109,7 +109,7 @@ DSP 的录音管线要 5 路（chmap 0x3d000：左、右、右 2、前、骨传�
 - **手机连接**：BLE 链路层已能与虚拟手机连接，但虚拟手机还不会说 rnlink 协议（帧格式 `aa55` 已见，消息未解析），所以依赖手机 App 的功能仍停在「请将眼镜连接至手机 App」。尚未建模：BR/EDR（寻呼/寻呼扫描后的 ACL、LMP，因此 SPP/RFCOMM、iAP2、A2DP、HFP 都不可用）、链路加密与 SMP 配对（AES 引擎 0xb0–0xc4、CRYPT 中断）、第二套基带 IP（0x6d060000）的空口桥、每个连接事件只收发一个 PDU。iOS 上 rnlink 依赖 iAP2（BR/EDR + MFi 认证芯片签名），模拟器无法产生该签名，真 iPhone 的 iAP2 功能不可能在纯模拟下工作。
 - **音频**：HiFi4 DSP 不执行，只实现其接口（见「音频」一节），DSP 上的唤醒词第二级与降噪/波束由替身完成（本机识别 / 直通），不是原厂 Xtensa 算法。A2DP 音乐与 HFP 通话的音频要等经典蓝牙（BR/EDR）建模后接入。AP 繁忙时模拟仍略慢于实时，Mac 应用里的声音按整段延后播放。
 - **其他传感器**：光感 W1160（I2C1 0x48，固件读到 250 lux）、磁力计 MMC5603NJ（BTH I2C1 0x30，ID 0x10）已被原固件识别。IMU 换成自建 LSM6DSO32 模型（FIFO、INT1 低有效），中断经 PSC 的 BTH 组寄存器（使能 0x12c/0x1b4/0x1d8、状态 0x138/0x1b8/0x1dc，BTH NVIC 2）送达 BTH，BTH 按水位持续读 FIFO，颈部姿态监测拿到数据。`headMotion`（Pose/Nod/Shake/Turn，按出厂默认安装角 101°/−65°/−65° 反变换）可驱动它。原厂「抬头亮屏」默认关闭（手机 App 的 headup_switch），点头/摇头只在来电等场景由 AP 开启检测，这两项要等手机端协议才能完整验证。iO 没有佩戴传感器（`controlCapSensorAsync` 为空实现），状态机在按表冠后由 LIGHT_SLEEP 进入 RUNNING。BTH I2C1 的 DMA 模式未建模（固件两次超时后改用 FIFO）。Wi‑Fi 未建模。
-- **速度**：开机 20 秒模拟时间约 20 秒（Renode 启动另需约 6 秒）；桌面待机比实时快约 2–3 倍，Mac 应用（及命令行 `REALTIME=1`）把虚拟时间限制在不超过实时；表冠/语音助手等界面动画段约为实时的 1/1.4。做法：AP、M55C1 真正进入 WFI 睡眠；DMA 按块搬运、NAND FIFO 批量读；固件的忙等延时（`hal_sys_timer_delay_us/_ns`、AON 计数器轮询）改为让核暂停相应的虚拟时间。四核串行执行（`SERIAL=0` 并行，偶发自旋锁活锁）。调试开关：`HOOKS=0` 去掉 Python 日志钩子，`IDLE_SPIN=1` 恢复 C1 空转，`DELAY_SPIN=1` 恢复忙等延时，`AON_POLL=0` 关掉 AON 计数器轮询暂停，`DMA_BLOCK=0` 恢复 DMA 逐字搬运，`QUANTUM=<秒>` 改核间同步量子（默认 0.0001）。
+- **速度**：开机 20 秒模拟时间约 20 秒（Renode 启动另需约 6 秒）；桌面待机比实时快约 2–3 倍，Mac 应用（及命令行 `REALTIME=1`）把虚拟时间限制在不超过实时；表冠场景整体约 0.93 倍实时（用源码构建的 Renode），最重的双击唤醒动画段仍约 1.35 倍、长按段约 1.15 倍。做法：AP、M55C1 真正进入 WFI 睡眠；DMA 按块搬运、NAND FIFO 批量读；固件的忙等延时（`hal_sys_timer_delay_us/_ns`、AON 计数器轮询）改为让核跳过相应的虚拟时间（`SkipTime`，不清翻译缓存）；GPU 路径填充用活动边表、唤醒词识别的 FFT 系数预先算好（结果逐位相同）；`scripts/build-renode.sh` 给 tlib 打三个只影响速度的补丁（macOS 上不保存信号掩码的 setjmp、Cortex-M 写数据页时跳过 MPU 查表、普通写在无独占预约时不拿全局锁）。四核串行执行（`SERIAL=0` 并行，偶发自旋锁活锁）。调试开关：`HOOKS=0` 去掉 Python 日志钩子，`IDLE_SPIN=1` 恢复 C1 空转，`DELAY_SPIN=1` 恢复忙等延时，`AON_POLL=0` 关掉 AON 计数器轮询暂停，`DMA_BLOCK=0` 恢复 DMA 逐字搬运，`QUANTUM=<秒>` 改核间同步量子（默认 0.0001；调大虽更快但会改变双击后的界面走向，不建议），`ADVANCE=1` 让 Renode 不按主机时钟限速（只用于测模拟器本身速度；默认虚拟时间不超前主机时间）。
 - `pixel_monospaced_latin_sub` 字体不是原厂文件（未识别出原字体）。
 
 ## 研究工具

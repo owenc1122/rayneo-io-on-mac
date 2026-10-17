@@ -144,7 +144,9 @@ class RnlinkPhone:
     """
 
     def __init__(self, say, send, central):
+        import os
         self.say, self.send, self.central = say, send, central
+        self.notif_demo = bool(os.environ.get('NOTIF_DEMO'))
         self.started = False
         self.dev_info_done = False
         self.authed = False
@@ -196,7 +198,9 @@ class RnlinkPhone:
             self.on_rnlink_cmd(cmd, data)
         elif business == 0x13:
             self.on_aisubtitle(payload)
-        elif business in (0x0f, 0x0e, 0x0d, 0x0c, 0x18):
+        elif business == 0x0d:
+            self.on_assistant(payload)
+        elif business in (0x0f, 0x0e, 0x0c, 0x18):
             self.on_feature(business, payload)
 
     # ---- AiSubtitle (live captions / translation), business 0x13 ----
@@ -254,6 +258,55 @@ class RnlinkPhone:
         self.say('rnlink AiSubtitle -> DISPLAY_TEXT mode=%s status=%s %r / %r' % (mode, status, src, dst))
         self.tx(0x13, pb_msg(5, message=json.dumps(msg), sequence=seq))
 
+    # ---- AI voice assistant, business 0x0d (VOICE_ASSISTANT_CMD) ----
+    # Glasses send type 1 WAKEUP {"rc","linkType"} on double-click. The phone answers the voice
+    # request: ASR text (handleAsrText, keys {text, final}) then the NLP answer
+    # (handleNlpIntentResult / NLP text). We use a local stand-in for the recognized query + answer.
+    def on_assistant(self, payload):
+        import json, os
+        pb = pb_decode(payload); typ = pb.get(2)
+        try:
+            msg = json.loads(pb.get(3, b'{}').decode())
+        except Exception:
+            msg = {}
+        self.say('rnlink VOICE_ASSISTANT_CMD type=%s %s' % (typ, msg))
+        if typ == 1:                      # WAKEUP -> start a stand-in voice session
+            if os.environ.get('ASSIST_PROBE'):
+                for t in range(2, 60):    # map type numbers: glasses log the received type name
+                    self.tx(0x0d, pb_msg(t, message=json.dumps({'text': 'probe-%d' % t, 'final': True})))
+                return
+            self.assist_answer()
+
+    # Assistant message types (probed from the glasses' dispatchMessage log):
+    ASSIST_ASR = 5          # ASR_TEXT {text, final} -> shows the recognized query
+    ASSIST_THINKING = 10    # THINKING_STATUS
+    ASSIST_DOMAIN = 32      # DOMAIN (NLP answer content routed to DomainRuntime)
+    ASSIST_NLP_DONE = 11    # NLP_TEXT_DISPLAY_COMPLETE
+
+    ASSIST_STATE = 9        # STATE_CHANGE {rc} -> drives the session state machine
+
+    def assist_answer(self, query='今天天气怎么样？', answer='上海今天多云，23°C，适合外出，记得带把伞。'):
+        import json
+        # Drive the session out of IdleState: STATE_CHANGE event (5) with rc 4 switches
+        # Idle -> Listening (IdleState::onEvent, given wakeupType 8 from the crown wakeup).
+        self.tx(0x0d, pb_msg(self.ASSIST_STATE, message=json.dumps({'rc': 4})))
+        self.say('rnlink VOICE_ASSISTANT -> STATE_CHANGE listening')
+        # Stand-in voice session: recognized query (ASR final), then the NLP answer text.
+        self.tx(0x0d, pb_msg(self.ASSIST_ASR, message=json.dumps({'text': query, 'final': True})))
+        self.say('rnlink VOICE_ASSISTANT -> ASR_TEXT %r' % query)
+        # Listening -> next state (rc 3) so the session moves past listening to show the answer.
+        self.tx(0x0d, pb_msg(self.ASSIST_STATE, message=json.dumps({'rc': 3})))
+        self.say('rnlink VOICE_ASSISTANT -> STATE_CHANGE answering')
+        # DOMAIN answer (handleDomainMessage schema): domain "intent" = general Q&A; answer/text with
+        # isFinal; sid+round tie it to the session.
+        sid = 'standin-sid-1'
+        self.tx(0x0d, pb_msg(self.ASSIST_DOMAIN, message=json.dumps(
+            {'domain': 'chat', 'intent': 'chat', 'sid': sid, 'round': 1,
+             'answer': answer, 'text': answer, 'isFinal': True})))
+        self.say('rnlink VOICE_ASSISTANT -> DOMAIN answer %r' % answer)
+        self.tx(0x0d, pb_msg(self.ASSIST_NLP_DONE, message=json.dumps(
+            {'sid': sid, 'text': answer, 'isFinal': True, 'final': True})))
+
     def on_feature(self, business, payload):
         pb = pb_decode(payload)
         typ = pb.get(2)
@@ -275,6 +328,14 @@ class RnlinkPhone:
             self.tx(0x0f, pb_msg(typ or 6, message=payload_json))
         if 'current_weather_request' in text or 'current_weather' in text:
             self.push_weather()
+            # Re-push a notification periodically (new UID each time) so a banner is on-screen when
+            # a frame is captured; the glasses auto-dismiss each after ~5 s.
+            if getattr(self, 'notif_demo', False):
+                self.notif_tick = getattr(self, 'notif_tick', 0) + 1
+                if self.notif_tick % 20 == 0:
+                    self.notif_uid = getattr(self, 'notif_uid', 1) + 1
+                    self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',
+                                           app='WhatsApp', uid=str(self.notif_uid), ntype=1)
             # Piggyback the caption stream on this frequent tick so it stays on-screen.
             if getattr(self, 'caption_lines', None):
                 # Advance to the next distinct line every ~8 weather ticks (a few seconds apart);
@@ -312,5 +373,22 @@ class RnlinkPhone:
                 self.authed = True
                 self.say('rnlink AUTH OK, glasses reply %s' % data.hex())
                 self.push_weather()           # proactively fill the home-screen weather
+                # Declare the phone app's AI-assistant compatibility version so the glasses treat the
+                # voice assistant as available (otherwise it shows "连接手机 App 后重试").
+                import json as _j
+                self.tx(0x0d, pb_msg(31, message=_j.dumps({'major': 5, 'minor': 0})))
+                if getattr(self, 'notif_demo', False):
+                    # Notification channel = business 0x15; "type" 1 = add/display (2 remove, 3 update).
+                    self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',
+                                           app='WhatsApp', appid='com.whatsapp', uid='1', ntype=1)
         else:
             self.say('rnlink cmd 0x%02x data %s (unhandled)' % (cmd, data.hex()))
+
+    def push_notification(self, business, title, content, app='WhatsApp', appid='com.whatsapp',
+                          subtitle='', uid='1', category=0, ntype=1):
+        import json, time as _t
+        msg = {'notificationUID': uid, 'appId': appid, 'appName': app, 'title': title,
+               'subtitle': subtitle, 'content': content, 'category': category, 'type': ntype,
+               'timestamp': int(_t.time() * 1000), 'phoneNumber': ''}
+        self.say('rnlink -> NOTIFICATION business=0x%02x %r / %r' % (business, title, content))
+        self.tx(business, pb_msg(2, message=json.dumps(msg)))

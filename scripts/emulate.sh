@@ -15,6 +15,8 @@ extra=${4:-}
 case "$duration" in ''|*[!0-9.]*) echo 'Invalid simulated duration' >&2; exit 1;; esac
 [ -f "$fwdir/OtaFileInfo.json" ] || { echo "No OtaFileInfo.json in $fwdir" >&2; exit 1; }
 renode=${RENODE:-$root/.local/renode/Renode.app/Contents/MacOS/renode}
+# A source build from scripts/build-renode.sh (same Renode, faster tlib) wins over the downloaded one.
+[ -n "${RENODE:-}" ] || [ ! -x "$root/.local/renode-build/renode" ] || renode=$root/.local/renode-build/renode
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 python3 scripts/make-flash-image.py "$fwdir" "$out/flash" > "$out/flash-layout.log"

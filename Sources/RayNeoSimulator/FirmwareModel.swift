@@ -52,12 +52,15 @@ import SwiftUI
         return nil
     }
 
-    /// Renode: bundled copy, a per-user install, the development checkout, or /Applications.
+    /// Renode: bundled copy, a per-user install, the development checkout (source build first), or /Applications.
     private func renodeExecutable() -> URL? {
         var candidates: [URL] = []
         if let resources = Bundle.main.resourceURL { candidates.append(resources.appendingPathComponent("renode/Renode.app/Contents/MacOS/renode")) }
         candidates.append(dataDirectory.appendingPathComponent("renode/Renode.app/Contents/MacOS/renode"))
-        if let root = assetRoot { candidates.append(root.appendingPathComponent(".local/renode/Renode.app/Contents/MacOS/renode")) }
+        if let root = assetRoot {
+            candidates.append(root.appendingPathComponent(".local/renode-build/renode"))   // scripts/build-renode.sh
+            candidates.append(root.appendingPathComponent(".local/renode/Renode.app/Contents/MacOS/renode"))
+        }
         candidates.append(URL(fileURLWithPath: "/Applications/Renode.app/Contents/MacOS/renode"))
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
