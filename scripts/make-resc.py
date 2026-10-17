@@ -77,6 +77,9 @@ lines += [
 ]) + [
     'logLevel 3 nvic',
     'logLevel 3 bthNvic',
+    # All cores on one emulation thread: the peripheral models are shared by the AP, M55C1, BTH and
+    # BTC and assume one caller at a time (parallel CPU threads deadlocked on model locks).
+    'emulation SetGlobalSerialExecution true',
     'cpu PerformanceInMips 200',
     'btc PerformanceInMips 100',
     'bth PerformanceInMips 100',

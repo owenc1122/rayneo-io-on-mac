@@ -35,7 +35,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 direction:Direction.Ascending,enabled:true,eventEnabled:false,autoUpdate:true);
             alarm=new LimitTimer(machine.ClockSource,TicksPerSecond,this,"btAlarm",1,
                 direction:Direction.Ascending,enabled:false,workMode:WorkMode.OneShot,eventEnabled:true,autoUpdate:true);
-            alarm.LimitReached+=()=>{ lock(sync) Process(); };
+            // LimitTimer events run under the clock source lock while CPU threads read the clock inside
+            // lock(sync); handle the alarm on the machine thread to keep the lock order one-way.
+            alarm.LimitReached+=()=>machine.ScheduleAction(TimeInterval.Empty,_=>{ lock(sync) Process(); });
         }
         public GPIO IRQ { get; }
         public bool TraceEvents { get; set; }
