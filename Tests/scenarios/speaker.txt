@@ -1,0 +1,10 @@
+# Speaker path on the stock firmware without a phone: the AP shell's mediatool runs the factory speaker
+# test (fspeakerstart 2 = audio_factory_test_music_player_start), which plays the MP3 embedded in the AP
+# image (buff://0x182a5a6a_11472.mp3, a 1 kHz tone) through smf: AP demuxer -> aplay1 shm FIFO -> HiFi4.
+# The stand-in decodes it into speaker.raw (48 kHz stereo s16le); scripts/check-audio.py wraps it as WAV.
+uart WriteLine "mediatool"
+emulation RunFor "2"
+uart WriteLine "fspeakerstart 2"
+emulation RunFor "4"
+uart WriteLine "fteststop"
+emulation RunFor "1"

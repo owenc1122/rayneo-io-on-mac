@@ -119,6 +119,11 @@ sysCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40000000
     APToCoreOneRx1 -> c1Nvic@89
     APToCoreOneTx0 -> c1Nvic@91
     APToCoreOneTx1 -> c1Nvic@92
+    // AP<->HiFi4 DSP (BES1700_HiFi4 stand-in): DSP cfg rx 0x4c,0x4d / tx 0x4f,0x50
+    DspToAPRx0 -> nvic@76
+    DspToAPRx1 -> nvic@77
+    DspToAPTx0 -> nvic@79
+    DspToAPTx1 -> nvic@80
     CoreOneBTReceive0 -> c1Nvic@104
     CoreOneBTReceive1 -> c1Nvic@105
     CoreOneBTReceive2 -> c1Nvic@43
@@ -128,6 +133,10 @@ sysCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40000000
     CoreOneBTTransmit2 -> c1Nvic@29
     CoreOneBTTransmit3 -> c1Nvic@30
     coreOneCpu: c1
+
+// HiFi4 audio DSP stand-in (see BES1700_HiFi4.cs). The window only exposes debug counters.
+hifi4: Miscellaneous.BES1700_HiFi4 @ sysbus 0x4fff0000
+    mailbox: sysCmu
 
 ispi: SPI.BES1700_ISPI @ sysbus 0x4000a000
 
@@ -142,6 +151,10 @@ dma: DMA.BES1700_DMA @ sysbus 0x401a0000
     IRQ -> nvic@37
 
 uart: UART.BES1700_UART @ sysbus 0x4000b000
+    // hal_uart table 0x1829ab14: {base 0x4000b000, NVIC irq byte +4 = 0x37}. RX (DMA + receive timeout)
+    // lets scenarios type at the AP NSH (ap>) with `uart WriteLine "..."`.
+    dma: dma
+    Interrupt -> nvic@55
 
 dwt: Miscellaneous.DWT @ sysbus 0xe0001000
     frequency: 240000000

@@ -63,6 +63,12 @@ lines += [
     f'sysbus LoadBinary {at(out / "flash/flash0.bin")} 0x10000000',
     f'sysbus LoadBinary {at(out / "flash/flash1.bin")} 0x28000000',
     f'lcdc FrameImagePath "{out}/frame.pgm"',
+    # HiFi4 stand-in host audio: played streams are appended to speaker.raw (s16le, format in the log);
+    # MIC=<wav or raw s16le 16 kHz mono> feeds the record streams (silence otherwise).
+    f'hifi4 SpeakerFile "{out}/speaker.raw"',
+    f'hifi4 TapDirectory "{out}"',
+] + ([f'hifi4 MicFile "{__import__("os").environ["MIC"]}"'] if __import__('os').environ.get('MIC') else []) + (
+    ['hifi4 MicLive true'] if __import__('os').environ.get('MIC_LIVE') else []) + [
 ] + ([f'nand LoadImage {at(out / "nand/nand-data.bin")}'] if (out / 'nand/nand-data.bin').exists() else []) + (
     [f'nand LoadState {at(Path(state, "nand-state.bin"))}'] if (state := __import__('os').environ.get('STATE')) and Path(state, 'nand-state.bin').exists() else []) + ([] if not __import__('os').environ.get('APIRQDBG') else [
     'cpu AddHook 0x1008bc """\nn=self.GetRegister(0).RawValue\nif n>=100 and n<=115: print(\'[APIRQ] %d sp=0x%x\' % (n, self.GetRegister(13).RawValue))\n"""',
