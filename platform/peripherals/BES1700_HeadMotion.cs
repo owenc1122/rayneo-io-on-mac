@@ -5,8 +5,12 @@
 //   monitor: headMotion Pose 20 0      (pitch up 20 deg, roll 0)
 //            headMotion Nod             (down and back, ~0.6 s)    headMotion Shake   (left-right, ~0.8 s)
 //            headMotion Turn 30         (yaw 30 deg over 0.5 s)
-// Axis convention (glasses frame, assumption until checked against a real unit): X forward, Y left, Z up;
-// pitch rotates about Y, yaw about Z, roll about X. Rates in dps, acceleration in g.
+// Axis convention = the BTH neck monitor's head frame (after its imu_params rotation, see Mount()):
+//   pitch = atan2(gy, gz), rotation about X, positive = head up (the head-up threshold, default 20 deg);
+//   roll  = atan2(-gx, sqrt(gy^2+gz^2)), rotation about Y; yaw about Z. Nod = X-rate peak-to-peak,
+//   shake = Z-rate (neck_posture_monitor). Head-up wake needs pitch rising over three 200 ms samples
+//   with X the dominant rate, so poses are played at a human head speed, not as a step.
+// Rates in dps, acceleration in g.
 using System;
 using System.Collections.Generic;
 using Antmicro.Renode.Core;
@@ -28,8 +32,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         public void Pose(double pitchDegrees, double rollDegrees)
         {
-            Play(new List<(double, double, double, double)> { (0.25, pitchDegrees - pitch, rollDegrees - roll, 0) });
+            double dp = pitchDegrees - pitch, dr = rollDegrees - roll;
+            double t = Math.Max(0.25, Math.Max(Math.Abs(dp), Math.Abs(dr)) / HeadSpeed);
+            Play(new List<(double, double, double, double)> { (t, dp, dr, 0) });
         }
+        // Typical deliberate head raise/lower speed (deg/s).
+        public double HeadSpeed { get; set; } = 70;
         public void Nod() { Play(new List<(double, double, double, double)> { (0.3, -25, 0, 0), (0.3, 25, 0, 0) }); }
         public void Shake() { Play(new List<(double, double, double, double)> { (0.2, 0, 0, 30), (0.4, 0, 0, -60), (0.2, 0, 0, 30) }); }
         public void Turn(double yawDegrees) { Play(new List<(double, double, double, double)> { (0.5, 0, 0, yawDegrees) }); }
@@ -45,7 +53,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 for(int i = 0; i < n; i++) {
                     machine.ScheduleAction(TimeInterval.FromSeconds(at), _ => {
                         pitch += rp * step; roll += rr * step;
-                        Apply(pitch, roll, rr, rp, ry);
+                        Apply(pitch, roll, rp, rr, ry);
                     });
                     at += step;
                 }
@@ -62,8 +70,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private void Apply(double p, double r, double rateX, double rateY, double rateZ)
         {
             double pr = p * Math.PI / 180, rr = r * Math.PI / 180;
-            // Gravity reaction in the head frame at rest is +1 g up; tilting moves it to X/Y.
-            var g = new[] { -Math.Sin(pr), Math.Sin(rr) * Math.Cos(pr), Math.Cos(rr) * Math.Cos(pr) };
+            // Gravity reaction in the head frame at rest is +1 g along Z; pitch moves it to Y, roll to X.
+            var g = new[] { -Math.Sin(rr), Math.Cos(rr) * Math.Sin(pr), Math.Cos(rr) * Math.Cos(pr) };
             var w = new[] { rateX, rateY, rateZ };
             var R = Mount();
             var gs = MulT(R, g); var ws = MulT(R, w);

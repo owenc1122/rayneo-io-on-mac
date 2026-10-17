@@ -309,7 +309,7 @@ import SwiftUI
 
     // MARK: input (crown key on GPIO0 P0_1, crown rotation via the OTS optical encoder)
 
-    enum Input { case click, doubleClick, longPress, rotate(Int), press, release }
+    enum Input { case click, doubleClick, longPress, rotate(Int), press, release, head(String) }
 
     func send(_ input: Input) {
         switch input {
@@ -319,6 +319,7 @@ import SwiftUI
         case .rotate(let steps): command("i2c0.ots Rotate \(steps * 400)")
         case .press: command("gpio0 SetInput 1 false")      // crown key held down (P0_1 active low)
         case .release: command("gpio0 SetInput 1 true")
+        case .head(let motion): command("headMotion \(motion)")   // BTH IMU, played in virtual time
         }
     }
 

@@ -39,6 +39,7 @@ run bt 15 bt-reconnect.txt
 run record 16 record.txt MIC="$ta/wake-xiaolei.wav"
 run speaker 16 speaker.txt
 run wake 16 wake.txt VOICE_WAKE=1 MIC="$ta/wake-xiaolei.wav" MIC_LOOP=0
+run headup 45 headup.txt
 run wakeneg 16 wake-negative.txt VOICE_WAKE=1 MIC="$ta/confusables.wav" MIC_LOOP=0
 phone weather 30 bt-weather.txt
 phone subtitle 30 bt-subtitle.txt
@@ -54,7 +55,7 @@ fail=0
 check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fail=1; fi; }
 n() { c=$(grep -ac "$2" "$out/$1/boot.log" 2>/dev/null); echo "${c:-0}"; }
 shots() { ls "$out/$1" 2>/dev/null | grep -c '^shot-'; }
-for r in crown rotate bt record speaker wake wakeneg weather subtitle notification assistant btrecord settings; do
+for r in crown rotate bt record speaker wake wakeneg headup weather subtitle notification assistant btrecord settings; do
     check "$r: no firmware assert" "[ \$(n $r 'dump_assert_info: Assert') -eq 0 ]"
 done
 check "crown: 10 screenshots" "[ \$(shots crown) -eq 10 ]"
@@ -64,6 +65,8 @@ corr=$(python3 scripts/check-audio.py "$out/record" "$ta/wake-xiaolei.wav" 2>&1 
 check "record: correlation ${corr:-none} >= 0.85" "python3 -c 'import sys; sys.exit(0 if float(\"${corr:-0}\") >= 0.85 else 1)'"
 check "speaker: tone captured" "python3 scripts/check-audio.py '$out/speaker' 2>&1 | grep -q 'peak 32768'"
 check "wake: 小雷小雷 confirmed" "[ \$(n wake 'wake word confirmed') -gt 0 ]"
+check "headup: neck monitor sent head up while screen off" "[ \$(n headup 'Sent head up event') -gt 0 ]"
+check "headup: screen turned on by head-up" "[ \$(n headup 'screen on by headup=1') -gt 0 ]"
 check "wake-negative: no wake" "[ \$(n wakeneg 'wake word confirmed') -eq 0 ]"
 for r in weather subtitle notification assistant btrecord settings; do
     check "$r: rnlink auth" "[ \$(n $r 'auth success') -gt 0 ]"

@@ -9,5 +9,5 @@ lcdc SaveFrame @OUT/shot-1-off.pgm
 headMotion Pose -30 0
 emulation RunFor "2"
 headMotion Pose 25 0
-emulation RunFor "3"
+emulation RunFor "6"
 lcdc SaveFrame @OUT/shot-2-headup.pgm
