@@ -36,6 +36,8 @@ class Central:
         self.services = []
         self.chars = []
         self.events = 0
+        self.followups = []
+        self.last_read = 0
 
     def say(self, *a):
         print(time.strftime('%H:%M:%S'), *a, file=self.log, flush=True)
@@ -162,10 +164,19 @@ class Central:
                 self.gatt_step = 'chars'
             elif req == 0x08 and err == 0x0a:
                 self.say('characteristic discovery complete (%d characteristics)' % len(self.chars))
-                self.gatt_step = None
+                self.plan_follow_up()
+            elif self.followups:
+                self.say('ATT error req 0x%02x handle 0x%04x err 0x%02x' % (req, h, err))
+                self.gatt_step = 'follow'
             else:
                 self.say('ATT error req 0x%02x handle 0x%04x err 0x%02x' % (req, h, err))
                 self.gatt_step = None
+        elif op == 0x0b:
+            self.say('read 0x%04x = %s' % (self.last_read, pdu[1:].hex()))
+            self.gatt_step = 'follow'
+        elif op == 0x13:
+            self.say('write response')
+            self.gatt_step = 'follow'
         elif op in (0x1b, 0x1d):
             self.say('glasses %s handle 0x%04x %s' % ('notify' if op == 0x1b else 'indicate',
                                                        struct.unpack_from('<H', pdu, 1)[0], pdu[3:].hex()))
@@ -182,8 +193,29 @@ class Central:
             self.say('glasses ATT %s' % pdu.hex())
         self.pending_att = False
 
+    def plan_follow_up(self):
+        # Read every readable value, then subscribe to notify/indicate characteristics (CCCD = value+1).
+        self.followups = [('read', vh) for h, props, vh, uuid in self.chars if props & 0x02]
+        self.followups += [('subscribe', vh + 1, 1 if props & 0x10 else 2)
+                           for h, props, vh, uuid in self.chars if props & 0x30]
+        self.gatt_step = 'follow'
+
     def gatt_next(self):
         if getattr(self, 'pending_att', False):
+            return
+        if self.gatt_step == 'follow':
+            if not self.followups:
+                self.say('GATT client idle; waiting for notifications')
+                self.gatt_step = None
+                return
+            step = self.followups.pop(0)
+            if step[0] == 'read':
+                self.last_read = step[1]
+                self.send_l2cap(4, bytes([0x0a]) + struct.pack('<H', step[1]))
+            else:
+                self.say('subscribe CCCD 0x%04x = %d' % (step[1], step[2]))
+                self.send_l2cap(4, bytes([0x12]) + struct.pack('<HH', step[1], step[2]))
+            self.pending_att = True
             return
         if self.gatt_step == 'mtu':
             self.send_l2cap(4, bytes([0x02]) + struct.pack('<H', 247))

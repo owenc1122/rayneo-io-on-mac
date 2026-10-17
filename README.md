@@ -20,6 +20,13 @@ sh scripts/build-app.sh                 # BUNDLE_RENODE=1 时把 Renode 一起�
 sh scripts/run-app.sh                   # 等同于 Finder 双击
 ```
 
+虚拟手机（BLE）：
+
+```sh
+python3 scripts/ble-peer.py --port 23600 --log peer.log &
+sh scripts/emulate.sh /path/to/StrixOS-1.0.4.12 40 .local/runs/ble "$PWD/tests/scenarios/ble-peer.resc"
+```
+
 应用首次启动会弹窗让你选择固件文件夹，可在「固件」菜单里重新选择或指定字体文件夹。键盘：空格单击、D 双击、L 长按、↑/↓ 或滚轮旋转表冠。生成的闪存/NAND 镜像和日志放在 `~/Library/Application Support/RayNeo io on Mac/runs/`。
 
 ## 原理概要
@@ -61,11 +68,13 @@ sh scripts/run-app.sh                   # 等同于 Finder 双击
 - **表冠**：单击进应用列表、再单击打开应用、长按/双击唤醒 RayNeo AI、旋转在应用列表里切换（录音→实时字幕→实时提示），全部由原固件处理（`tests/scenarios/crown.txt`、`rotate.txt`）。
 - **硬件定时器**：SP804 双定时器（0x40083000/0x40002000）补上后，按键去抖等软件定时器正常；I2C 改用自建 DesignWare 模型，不再出现读超时。
 - **蓝牙控制器**：BTC 原固件通过基带版本/软复位检查，响应主机 HCI 命令（Reset、读版本/地址、设置名称、事件掩码等），BLE 广播能开启。
+- **蓝牙基带**（`BES1700_BTController`）：两套 RW-IP 公共块（0x6d040000→BTC IRQ 1、0x6d060000→IRQ 39）的定时目标 1–3、软件中断、交换表活动调度（ACTSCHCNTL 0x110、ET 状态、活动 FIFO 结束/跳过）。BLE 广播按间隔真实运行（开启状态 0，之前为 2）；主机按绑定记录回连 iPhone 时控制器真实返回寻呼超时（status 4），iOS SPP 重试 3 次，C1 不再出现 `bes_hci_send_data osEventTimeout` 断言（60 秒运行，`tests/scenarios/bt-reconnect.txt`）。
+- **虚拟手机（BLE 链路层）**：`scripts/ble-peer.py` 作为中心设备，通过基带模型的空口桥（`btcRadio PeerPort`，交换内存 RX/TX 描述符 + 活动 FIFO 收发帧中断）连接原固件：CONNECT_IND 被接受，主机报告 LE ACL/GATT 已连接，LL 版本/特性/长度过程完成，ATT MTU 247，发现 GATT 数据库（GAP、GATT、RayNeo 服务 0xB81D：通知特征 `7db3e235…`、写特征 `ea8b70d5…`/`ea8b60c5…`），订阅后眼镜通过 0x8002 主动发出 rnlink 帧（`aa55…`）。
 - **Mac 应用**：窗口显示原固件画面，空格按住=按表冠、滚轮/方向键=旋转；退出时保存 NOR+NAND，下次启动恢复（设置、配对、文件保留）；「恢复出厂设置」清除。固件选择后复制到应用数据目录，避免访问「文稿」触发系统授权弹窗。
 
 ## 未完成 / 与真机仍有差异
 
-- **手机连接**：BTC 基带没有射频和基带定时中断模型，无法与任何手机真正连接；依赖手机 App 的功能（录音、字幕、提示、导航、AI 对话等）会停在「请将眼镜连接至手机 App」。
+- **手机连接**：BLE 链路层已能与虚拟手机连接，但虚拟手机还不会说 rnlink 协议（帧格式 `aa55` 已见，消息未解析），所以依赖手机 App 的功能仍停在「请将眼镜连接至手机 App」。尚未建模：BR/EDR（寻呼/寻呼扫描后的 ACL、LMP，因此 SPP/RFCOMM、iAP2、A2DP、HFP 都不可用）、链路加密与 SMP 配对（AES 引擎 0xb0–0xc4、CRYPT 中断）、第二套基带 IP（0x6d060000）的空口桥、每个连接事件只收发一个 PDU。iOS 上 rnlink 依赖 iAP2（BR/EDR + MFi 认证芯片签名），模拟器无法产生该签名，真 iPhone 的 iAP2 功能不可能在纯模拟下工作。
 - **音频**：HiFi4 音频 DSP、麦克风、扬声器未建模，没有声音输入输出。
 - **其他传感器**：IMU 只有静态数据（头部手势不可用），磁力计总线地址为推测，光感 W1160、佩戴检测、Wi‑Fi 未建模。
 - **速度**：约为实时的 1/8，开机到桌面约 2 分钟。主要开销在核间同步与 M55C1 的轮询，尚未优化。
