@@ -283,11 +283,20 @@ class RnlinkPhone:
     ASSIST_DOMAIN = 32      # DOMAIN (NLP answer content routed to DomainRuntime)
     ASSIST_NLP_DONE = 11    # NLP_TEXT_DISPLAY_COMPLETE
 
+    ASSIST_STATE = 9        # STATE_CHANGE {rc} -> drives the session state machine
+
     def assist_answer(self, query='今天天气怎么样？', answer='上海今天多云，23°C，适合外出，记得带把伞。'):
         import json
-        # Stand-in voice session: recognized query (ASR final), thinking, then the NLP answer text.
+        # Drive the session out of IdleState: STATE_CHANGE event (5) with rc 4 switches
+        # Idle -> Listening (IdleState::onEvent, given wakeupType 8 from the crown wakeup).
+        self.tx(0x0d, pb_msg(self.ASSIST_STATE, message=json.dumps({'rc': 4})))
+        self.say('rnlink VOICE_ASSISTANT -> STATE_CHANGE listening')
+        # Stand-in voice session: recognized query (ASR final), then the NLP answer text.
         self.tx(0x0d, pb_msg(self.ASSIST_ASR, message=json.dumps({'text': query, 'final': True})))
         self.say('rnlink VOICE_ASSISTANT -> ASR_TEXT %r' % query)
+        # Listening -> next state (rc 3) so the session moves past listening to show the answer.
+        self.tx(0x0d, pb_msg(self.ASSIST_STATE, message=json.dumps({'rc': 3})))
+        self.say('rnlink VOICE_ASSISTANT -> STATE_CHANGE answering')
         # DOMAIN answer (handleDomainMessage schema): domain "intent" = general Q&A; answer/text with
         # isFinal; sid+round tie it to the session.
         sid = 'standin-sid-1'
