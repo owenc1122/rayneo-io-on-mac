@@ -1,0 +1,20 @@
+diff --git a/exec.c b/exec.c
+index bdcebb2a..39a10539 100644
+--- a/exec.c
++++ b/exec.c
+@@ -746,6 +746,15 @@ void helper_mark_tbs_as_dirty(CPUState *env, target_ulong pc, uint32_t access_wi
+             //  we are not on the same mem page, the mapping just does not exist
+             return;
+         }
++#ifdef TARGET_PROTO_ARM_M
++        /* M-profile cores do not translate addresses: the lookup below returns `pc` or -1. If that page holds no
++         * translated code there is nothing to mark (and nothing to broadcast while broadcasting is off), so skip
++         * the MPU walk, which otherwise runs on every store to a data page. */
++        p = page_find(pc >> TARGET_PAGE_BITS);
++        if(p == NULL || (p->first_tb == NULL && !(broadcast && cpu->tb_broadcast_dirty))) {
++            return;
++        }
++#endif
+         //  Find the page using the platform specific mapping function
+         //  This is way slower, but it should be used only if the same page is being executed
+         phys_page = cpu_get_phys_page_debug(cpu, pc);

@@ -364,25 +364,33 @@ namespace Antmicro.Renode.Peripherals.Video
             foreach(var s in segs){minx=Math.Min(minx,Math.Min(s[0],s[2]));maxx=Math.Max(maxx,Math.Max(s[0],s[2]));miny=Math.Min(miny,Math.Min(s[1],s[3]));maxy=Math.Max(maxy,Math.Max(s[1],s[3]));}
             int x0=(int)Math.Floor(minx),y0=(int)Math.Floor(miny),x1=(int)Math.Ceiling(maxx)+1,y1=(int)Math.Ceiling(maxy)+1;
             Clip(t,ref x0,ref y0,ref x1,ref y1,true); if(x0>=x1||y0>=y1) return;
-            int sub=aa?4:1; var cov=new float[x1-x0]; var xs=new List<KeyValuePair<float,int>>();
+            int sub=aa?4:1; var cov=new float[x1-x0];
             var s2=GetSource(); var rows=new Dictionary<int,byte[]>(); uint blend=(ctrl>>8)&0xf; PrepPaint();
             var rect=ReadRect(t,x0,y0,x1,y1,bpp); var row=new byte[rect.RowLen]; bool anyDirty=false;
+            // Edges sorted by their top; the sample rows fy only increase, so an edge joins the active list once
+            // fy reaches its top and leaves it for good once fy reaches its bottom (the same lo<=fy<hi test as before).
+            var edges=new List<float[]>(); foreach(var s in segs) if(s[1]!=s[3]) edges.Add(s);
+            edges.Sort((a,b)=>Math.Min(a[1],a[3]).CompareTo(Math.Min(b[1],b[3])));
+            var active=new List<float[]>(); int next=0;
+            var xk=new float[edges.Count]; var xd=new int[edges.Count];
             for(int y=y0;y<y1;y++) {
                 Array.Clear(cov,0,cov.Length);
                 for(int k=0;k<sub;k++) {
-                    float fy=y+(k+0.5f)/sub; xs.Clear();
-                    foreach(var s in segs) {
-                        float ay=s[1],by=s[3]; if(ay==by) continue;
-                        int dir=by>ay?1:-1; float lo=Math.Min(ay,by),hi=Math.Max(ay,by);
-                        if(fy<lo||fy>=hi) continue;
-                        xs.Add(new KeyValuePair<float,int>(s[0]+(fy-ay)*(s[2]-s[0])/(by-ay),dir));
+                    float fy=y+(k+0.5f)/sub;
+                    while(next<edges.Count&&Math.Min(edges[next][1],edges[next][3])<=fy) active.Add(edges[next++]);
+                    active.RemoveAll(s=>fy>=Math.Max(s[1],s[3]));
+                    int n=0;
+                    foreach(var s in active) {
+                        float ay=s[1],by=s[3];
+                        xd[n]=by>ay?1:-1; xk[n++]=s[0]+(fy-ay)*(s[2]-s[0])/(by-ay);
                     }
-                    xs.Sort((a,b)=>a.Key.CompareTo(b.Key));
+                    // Crossings with equal x bound an empty span, so their order does not change the coverage.
+                    Array.Sort(xk,xd,0,n);
                     int wind=0;
-                    for(int i=0;i+1<xs.Count;i++) {
-                        wind+=xs[i].Value; bool inside=evenOdd?(i&1)==0:wind!=0;
+                    for(int i=0;i+1<n;i++) {
+                        wind+=xd[i]; bool inside=evenOdd?(i&1)==0:wind!=0;
                         if(!inside) continue;
-                        float a=Math.Max(xs[i].Key,x0),b=Math.Min(xs[i+1].Key,x1); if(b<=a) continue;
+                        float a=Math.Max(xk[i],x0),b=Math.Min(xk[i+1],x1); if(b<=a) continue;
                         for(int px=(int)Math.Floor(a);px<Math.Ceiling(b)&&px<x1;px++) {
                             float c=Math.Min(b,px+1)-Math.Max(a,px); if(c>0) cov[px-x0]+=(aa?c:(c>=0.5f||(a<=px+0.5f&&b>px+0.5f)?1:0))/sub;
                         }

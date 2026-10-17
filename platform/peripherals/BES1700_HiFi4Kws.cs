@@ -142,11 +142,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 int bit = n >> 1; for(; (j & bit) != 0; bit >>= 1) j ^= bit; j ^= bit;
                 if(i < j) { var t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
             }
-            for(int size = 2; size <= n; size <<= 1) {
-                double ang = -2 * Math.PI / size;
+            for(int size = 2, stage = 0; size <= n; size <<= 1, stage++) {
+                double[] cos = TwiddleCos[stage], sin = TwiddleSin[stage];
                 for(int i = 0; i < n; i += size)
                     for(int k = 0; k < size / 2; k++) {
-                        double wr = Math.Cos(ang * k), wi = Math.Sin(ang * k);
+                        double wr = cos[k], wi = sin[k];
                         int a = i + k, b = a + size / 2;
                         double tr = re[b] * wr - im[b] * wi, ti = re[b] * wi + im[b] * wr;
                         re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
@@ -183,6 +183,18 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private static readonly double[] Hamming = MakeHamming();
         private static readonly double[][] Mel; private static readonly int[] MelLo, MelHi;
         private static readonly double[,] Dct = MakeDct();
+        // FFT twiddles per stage, the same Math.Cos/Math.Sin(-2π/size * k) values the butterflies used to compute inline.
+        private static readonly double[][] TwiddleCos = MakeTwiddles(Math.Cos), TwiddleSin = MakeTwiddles(Math.Sin);
+        private static double[][] MakeTwiddles(Func<double, double> f)
+        {
+            var t = new List<double[]>();
+            for(int size = 2; size <= Nfft; size <<= 1) {
+                double ang = -2 * Math.PI / size; var w = new double[size / 2];
+                for(int k = 0; k < size / 2; k++) w[k] = f(ang * k);
+                t.Add(w);
+            }
+            return t.ToArray();
+        }
         static HiFi4KeywordSpotter()
         {
             Func<double, double> mel = f => 2595 * Math.Log10(1 + f / 700), imel = m => 700 * (Math.Pow(10, m / 2595) - 1);

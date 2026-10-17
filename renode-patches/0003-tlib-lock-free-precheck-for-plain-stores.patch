@@ -1,0 +1,39 @@
+diff --git a/include/atomic.h b/include/atomic.h
+index 9fbac95d..71013062 100644
+--- a/include/atomic.h
++++ b/include/atomic.h
+@@ -54,6 +54,15 @@ typedef struct atomic_memory_state_t {
+ 
+ bool are_multiple_cpus_registered();
+ 
++//  Lock-free pre-check for plain stores. With no reservations and no CPU holding the global memory lock,
++//  taking the lock and calling `register_address_access` is a no-op, and the moment both are observed empty
++//  is a valid point to order that no-op at, so the two lock round-trips per store can be skipped.
++static inline bool address_access_needs_registration(atomic_memory_state_t *sm)
++{
++    return sm != NULL && (__atomic_load_n(&sm->reservations_count, __ATOMIC_ACQUIRE) != 0 ||
++                          __atomic_load_n(&sm->locking_cpu_id, __ATOMIC_ACQUIRE) != NO_CPU_ID);
++}
++
+ int32_t register_in_atomic_memory_state(atomic_memory_state_t *sm, int32_t atomic_id);
+ 
+ void acquire_global_memory_lock(struct CPUState *env);
+diff --git a/include/softmmu_template.h b/include/softmmu_template.h
+index 214c44ab..bcefe10a 100644
+--- a/include/softmmu_template.h
++++ b/include/softmmu_template.h
+@@ -426,9 +426,11 @@ __attribute__((always_inline)) inline void REGPARM glue(glue(__inner_st, SUFFIX)
+ 
+ #ifndef SUPPORTS_HST_ATOMICS
+     //  Only needed for the old atomics implementation
+-    acquire_global_memory_lock(cpu);
+-    register_address_access(cpu, addr);
+-    release_global_memory_lock(cpu);
++    if(address_access_needs_registration(cpu->atomic_memory_state)) {
++        acquire_global_memory_lock(cpu);
++        register_address_access(cpu, addr);
++        release_global_memory_lock(cpu);
++    }
+ #endif
+ 
+     index = (addr >> TARGET_PAGE_BITS) & (CPU_TLB_SIZE - 1);
