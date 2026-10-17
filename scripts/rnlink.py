@@ -194,8 +194,36 @@ class RnlinkPhone:
         if business == 0x10 and len(payload) >= 3:
             cmd = payload[0]; data = payload[3:]
             self.on_rnlink_cmd(cmd, data)
+        elif business == 0x13:
+            self.on_aisubtitle(payload)
         elif business in (0x0f, 0x0e, 0x0d, 0x0c, 0x18):
             self.on_feature(business, payload)
+
+    # ---- AiSubtitle (live captions / translation), business 0x13 ----
+    # PbMsg{type, message=JSON}: type 1 START_REQUEST, 2 START_REPLY, 3 END_REQUEST, 5 DISPLAY_TEXT,
+    # 6 RETRY_REQUEST, 7/8 SETTINGS_SYNC. The phone accepts a start and streams DISPLAY_TEXT {sid,src,dst}.
+    def on_aisubtitle(self, payload):
+        import json
+        pb = pb_decode(payload); typ = pb.get(2)
+        try:
+            msg = json.loads(pb.get(3, b'{}').decode())
+        except Exception:
+            msg = {}
+        self.say('rnlink AiSubtitle type=%s %s' % (typ, msg))
+        sid = msg.get('sid', '')
+        if typ == 1:                      # START_REQUEST -> accept, then stream a caption
+            self.tx(0x13, pb_msg(2, message=json.dumps({'sid': sid, 'code': 0, 'reason_code': 0})))
+            self.say('rnlink AiSubtitle -> START_REPLY sid=%s' % sid)
+            self.caption_sid = sid
+            self.push_caption('Hello from the virtual phone.', '来自虚拟手机的字幕')
+        elif typ == 7:                    # SETTINGS_SYNC_REQUEST -> empty reply
+            self.tx(0x13, pb_msg(8, message=json.dumps({'sid': sid, 'code': 0})))
+
+    def push_caption(self, src, dst='', seq=0):
+        import json
+        sid = getattr(self, 'caption_sid', '')
+        self.say('rnlink AiSubtitle -> DISPLAY_TEXT %r / %r' % (src, dst))
+        self.tx(0x13, pb_msg(5, message=json.dumps({'sid': sid, 'src': src, 'dst': dst}), sequence=seq))
 
     def on_feature(self, business, payload):
         pb = pb_decode(payload)
