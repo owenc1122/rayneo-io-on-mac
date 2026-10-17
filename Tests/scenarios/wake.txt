@@ -1,0 +1,14 @@
+# Voice wake 「小雷小雷」 with the stock two-stage chain (run with VOICE_WAKE=1 MIC=.local/test-audio/wake-xiaolei.wav
+# MIC_LOOP=0; scripts/make-test-audio.sh and scripts/make-kws-templates.sh create the inputs).
+# At boot the firmware's own KWS open loses a race with mediad (it waits 1 s for M55C1's smf, which that image
+# never starts) and stays closed until an assistant interaction; the double click re-opens it, as on the glasses.
+# Expect: "vad demo start" (BTH VAD library), "bth vad ready notify" (stock BTH first stage on the Mac audio),
+# "OfflineState::onEvent pre wakeup fast wakeup" (no phone: launch-app attempt), and the HiFi4 stand-in's second
+# stage "wake word confirmed -> hifi event 4".
+gpio0 Pulse 1 false 120
+emulation RunFor "0.15"
+gpio0 Pulse 1 false 120
+emulation RunFor "10"
+hifi4 MicRestart
+emulation RunFor "8"
+lcdc SaveFrame @OUT/shot-wake.pgm

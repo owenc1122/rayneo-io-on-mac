@@ -32,6 +32,9 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             if(offset == (alwaysOn ? 0x50 : 0x288)) return (uint)counter.Value;
             if(!alwaysOn && (offset==0xec || offset==0x224 || offset==0x1f4)) return ReadHostIPC(offset);
             if(!alwaysOn && offset==0x90) lock(ipcLock) return ReadCoreOneIPC();
+            // AON +0: chip ID, the part number in hex (1700 = 0x6a4). The BTH dynamic loader only loads algorithm
+            // libraries (pil_algo_vad_demo) when (id & 0xfff0) is a known BES part ({0x640, 0x6a0, 0x7d0, ...}).
+            if(alwaysOn && offset==0) return ChipId;
             long firstLock = alwaysOn ? 0x100 : 0xc0;
             int lockCount = alwaysOn ? 16 : 8;
             if(offset >= firstLock && offset < firstLock + lockCount*4) {
@@ -271,6 +274,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private readonly object ipcLock=new object();
         private uint apToBt,btToAp,apAck,btAck,apRxMask,apTxMask,btRxMask,btTxMask;
         public void Reset() { apToBt=btToAp=apAck=btAck=apRxMask=apTxMask=btRxMask=btTxMask=0;apReq=apDone=apMask=bthReq=bthDone=bthMask=0;coreOneMailbox=0;UpdateIPC();registers.Clear(); Array.Clear(locks, 0, locks.Length); counter.Reset(); }
+        public uint ChipId { get; set; } = 0x6a4;
         public long Size => 0x1000;
         private readonly bool alwaysOn;
         private readonly IMachine machine;

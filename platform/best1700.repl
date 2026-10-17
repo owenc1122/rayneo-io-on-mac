@@ -134,6 +134,11 @@ sysCmu: Miscellaneous.BES1700_ClockControl @ sysbus 0x40000000
     CoreOneBTTransmit3 -> c1Nvic@30
     coreOneCpu: c1
 
+// Internal codec (ADC2 feeds the BTH always-on VAD through bthDma1 request 6, see BES1700_Codec.cs).
+codec: Miscellaneous.BES1700_Codec @ sysbus 0x50300000
+    audio: hifi4
+    dma: bthDma1
+
 // HiFi4 audio DSP stand-in (see BES1700_HiFi4.cs). The window only exposes debug counters.
 hifi4: Miscellaneous.BES1700_HiFi4 @ sysbus 0x4fff0000
     mailbox: sysCmu
@@ -315,8 +320,9 @@ bthDma1: DMA.BES1700_DMA @ sysbus 0x50130000
 // model stands in for the LSM6DSO32; the I2C address is an assumption.
 bthImu: Sensors.LSM6DSO_IMU @ bthI2c1 0x6a
 
-// Magnetometer (mmc5603nj_init on the BTH, product ID 0x10). Bus 2 / 0x30 is an assumption.
-bthMag: Sensors.BES1700_MMC5603NJ @ bthI2c2 0x30
+// Magnetometer (mmc5603nj_init on the BTH, product ID 0x10). The stock BTH probes it on I2C1 at 0x30
+// (bthI2c1 reads of 0x39 at 0x30 during mmc5603nj_init).
+bthMag: Sensors.BES1700_MMC5603NJ @ bthI2c1 0x30
 
 // Second M55 core of the AP subsystem ("M55C1", nuttx_apc1.bin: CHIP_ROLE=CP), runs the
 // bluetoothd RPC server. Started by cp_subsys_open via AON +0xb4/+0x1a4.

@@ -34,7 +34,9 @@ namespace Antmicro.Renode.Peripherals.DMA
         }
         // Peripheral-to-memory request from a device FIFO (UART RX): one byte into the enabled flow-2
         // channel whose source is that device register. Returns false when no channel is waiting.
-        public bool PeripheralReceive(uint source, byte value) {
+        public bool PeripheralReceive(uint source, byte value) { return PeripheralReceive(source, value, 1); }
+        public bool PeripheralReceiveHalfword(uint source, ushort value) { return PeripheralReceive(source, value, 2); }
+        private bool PeripheralReceive(uint source, uint value, int width) {
             for(int c=0;c<8;c++) {
                 long b=0x100+c*0x20;
                 uint config=Get(b+16);
@@ -43,8 +45,8 @@ namespace Antmicro.Renode.Peripherals.DMA
                 if(count==0) continue;
                 var bus=machine.GetSystemBus(this);
                 uint dst=Get(b+4);
-                bus.WriteByte(dst,value);
-                if((ctrl&(1u<<27))!=0) regs[b+4]=dst+1;
+                if(width==1) bus.WriteByte(dst,(byte)value); else bus.WriteWord(dst,(ushort)value);
+                if((ctrl&(1u<<27))!=0) regs[b+4]=dst+(uint)width;
                 regs[b+12]=(ctrl&~0xfffu)|(count-1);
                 if(count-1==0) {
                     if((ctrl&0x80000000u)!=0) completed|=1u<<c;
@@ -62,6 +64,7 @@ namespace Antmicro.Renode.Peripherals.DMA
             var bus=machine.GetSystemBus(this);
             // Peripheral RX waits for a real request; never manufacture received data.
             uint flow=(Get(b+16)>>11)&7;
+            if(flow==2 && rxLog++<24) this.Log(LogLevel.Info,"DMA ch={0} peripheral->memory src={1:X} dst={2:X} ctrl={3:X} lli={4:X}",channel,Get(b),Get(b+4),Get(b+12),Get(b+8));
             if(flow!=0 && flow!=1 && flow!=5 && !(flow==2 && nandReady && (Get(b)==0x40198010 || Get(b)==0x40198008))) return;
             if(flow==2) {
                 uint available=(bus.ReadDoubleWord(0x40198004)>>12)&0x1fff;
@@ -104,7 +107,7 @@ namespace Antmicro.Renode.Peripherals.DMA
         private readonly IMachine machine;
         private readonly Dictionary<long,uint> regs=new Dictionary<long,uint>();
         private uint completed,errors;
-        private int transfers;
+        private int transfers, rxLog;
         private bool nandReady;
     }
 }

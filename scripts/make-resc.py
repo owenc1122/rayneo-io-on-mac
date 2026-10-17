@@ -68,7 +68,10 @@ lines += [
     f'hifi4 SpeakerFile "{out}/speaker.raw"',
     f'hifi4 TapDirectory "{out}"',
 ] + ([f'hifi4 MicFile "{__import__("os").environ["MIC"]}"'] if __import__('os').environ.get('MIC') else []) + (
-    ['hifi4 MicLive true'] if __import__('os').environ.get('MIC_LIVE') else []) + [
+    ['hifi4 MicLive true'] if __import__('os').environ.get('MIC_LIVE') else []) + (
+    ['hifi4 MicLoop false'] if __import__('os').environ.get('MIC_LOOP') == '0' else []) + (
+    # Wake-word enrolment recordings (scripts/make-kws-templates.sh); KWS=<dir> overrides.
+    [f'hifi4 KwsTemplates "{__import__("os").environ.get("KWS") or root / ".local/kws"}"'] if (__import__('os').environ.get('KWS') or (root / '.local/kws').exists()) else []) + [
 ] + ([f'nand LoadImage {at(out / "nand/nand-data.bin")}'] if (out / 'nand/nand-data.bin').exists() else []) + (
     [f'nand LoadState {at(Path(state, "nand-state.bin"))}'] if (state := __import__('os').environ.get('STATE')) and Path(state, 'nand-state.bin').exists() else []) + ([] if not __import__('os').environ.get('APIRQDBG') else [
     'cpu AddHook 0x1008bc """\nn=self.GetRegister(0).RawValue\nif n>=100 and n<=115: print(\'[APIRQ] %d sp=0x%x\' % (n, self.GetRegister(13).RawValue))\n"""',

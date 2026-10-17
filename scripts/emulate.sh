@@ -27,6 +27,8 @@ else
     # Bonded phone record (BOND=0 keeps the factory-fresh BondView start).
     [ "${BOND:-iPhone}" = 0 ] || python3 scripts/make-user-data.py "$out/flash/flash0.bin" --name "${BOND:-iPhone}" >> "$out/flash-layout.log"
 fi
+# Phone-app settings: VOICE_WAKE=1 turns on 「小雷小雷」 voice wake (factory default off), WAKE_WORD=1|2.
+[ -z "${VOICE_WAKE:-}" ] || python3 scripts/set-preference.py "$out/flash/flash0.bin" voice_wakeup="$VOICE_WAKE" ${WAKE_WORD:+wakeup_word=$WAKE_WORD} >> "$out/flash-layout.log"
 # NAND resource partitions (littlefs). Optional fonts: FONTS=<dir with .ttf> (factory fonts are not in the OTA set).
 venv=${RAYNEO_VENV:-$root/.local/venv}
 if [ -x "$venv/bin/python" ]; then

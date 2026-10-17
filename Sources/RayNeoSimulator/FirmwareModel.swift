@@ -20,6 +20,25 @@ import SwiftUI
 
     private static let firmwareKey = "firmwareDirectory"
     private static let fontsKey = "fontsDirectory"
+    private static let voiceWakeKey = "voiceWakeup"
+
+    /// 「小雷小雷」 voice wake, the RayNeo phone app's setting (PREF_AI_VOICE_WAKEUP), applied at each boot.
+    @Published var voiceWakeup: Bool = UserDefaults.standard.object(forKey: "voiceWakeup") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(voiceWakeup, forKey: Self.voiceWakeKey); if running { restart() } }
+    }
+
+    /// Enrolment recordings for the HiFi4 stand-in's wake-word spotter, made once with the macOS voices.
+    private var kwsDirectory: URL { dataDirectory.appendingPathComponent("kws", isDirectory: true) }
+    private func prepareWakeWords(thenBoot: Bool) {
+        guard let root = assetRoot else { return }
+        status = "正在准备唤醒词模板（首次约一分钟）…"
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = [root.appendingPathComponent("scripts/make-kws-templates.sh").path, kwsDirectory.path]
+        task.currentDirectoryURL = root
+        task.terminationHandler = { [weak self] _ in Task { @MainActor in if thenBoot { self?.boot() } } }
+        try? task.run()
+    }
 
     /// Folder with platform/ and scripts/: the app bundle's Resources, or the source checkout in development.
     private var assetRoot: URL? {
@@ -206,6 +225,9 @@ import SwiftUI
         if !fontsReady, UserDefaults.standard.string(forKey: Self.fontsKey) == nil, let app = installedRayNeoApp(), venvDirectory != nil {
             prepareFonts(from: app, thenBoot: true); return
         }
+        if !FileManager.default.fileExists(atPath: kwsDirectory.appendingPathComponent("4").path) {
+            prepareWakeWords(thenBoot: true); return
+        }
         guard let renode = renodeExecutable() else {
             failure = "未找到 Renode。请把 Renode.app 放到 /Applications 或 \(dataDirectory.path)/renode/"; return
         }
@@ -231,6 +253,8 @@ import SwiftUI
             let bridge = AudioBridge(runDirectory: output)
             environment["MIC"] = bridge.micPath
             environment["MIC_LIVE"] = "1"
+            environment["KWS"] = kwsDirectory.path
+            environment["VOICE_WAKE"] = voiceWakeup ? "1" : "0"
             task.environment = environment
             task.standardInput = FileHandle.nullDevice
             task.standardOutput = handle; task.standardError = handle
@@ -252,6 +276,9 @@ import SwiftUI
             process = task
             try task.run()
             running = true
+            bridge.wake.onKeyword = { [weak self] offset, event in
+                Task { @MainActor in self?.command("hifi4 KeywordAt \(offset) \(event)") }
+            }
             bridge.start(microphone: true)
             audio = bridge
             timer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
