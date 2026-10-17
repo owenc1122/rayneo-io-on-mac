@@ -223,9 +223,10 @@ class RnlinkPhone:
     def push_weather(self, temp=23, location='Shanghai', icon=1):
         import json
         # Dashboard command (launcher receiveMessage type 0x12 -> DashboardProtocolController::decode,
-        # which cJSON-parses {"cmd","payload":{value,mode,data}}; data is a nested JSON string with
-        # the weather fields temp/location/icon). cmd current_weather_update -> processCurrentWeatherUpdate.
-        data = json.dumps({'temp': temp, 'location': location, 'icon': icon})
+        # which cJSON-parses {"cmd","payload":{value,mode,data}}; data is a nested JSON string).
+        # applyCurrentWeatherUpdate reads data.temp (number), data.location (string) and validates
+        # data.icon is an OBJECT (its contents aren't parsed). cmd current_weather_update.
+        data = json.dumps({'icon': {'code': icon}, 'temp': temp, 'location': location})
         msg = json.dumps({'cmd': 'current_weather_update', 'payload': {'value': 0, 'mode': 0, 'data': data}})
         self.say('rnlink -> weather %s' % msg)
         self.tx(0x0f, pb_msg(0x12, message=msg))
@@ -238,9 +239,10 @@ class RnlinkPhone:
                 self.glasses_dev_addr = info[0x11]
             self.dev_info_done = True
             self.send_auth()
-        elif cmd == 0x18:                      # glasses auth reply (success)
-            self.authed = True
-            self.say('rnlink AUTH OK, glasses reply %s' % data.hex())
-            self.push_weather()               # proactively fill the home-screen weather
+        elif cmd in (0x18, 0x19):              # glasses auth reply (0x19 = wrapped success response)
+            if not self.authed:
+                self.authed = True
+                self.say('rnlink AUTH OK, glasses reply %s' % data.hex())
+                self.push_weather()           # proactively fill the home-screen weather
         else:
             self.say('rnlink cmd 0x%02x data %s (unhandled)' % (cmd, data.hex()))
