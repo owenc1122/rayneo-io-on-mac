@@ -101,7 +101,10 @@ lines += [
     # shared by several cores race. Needs Renode >= 1.17.0+20261016 (the 20260906 build stalled in WFI).
 ] + ([] if __import__('os').environ.get('SERIAL') == '0' else ['emulation SetGlobalSerialExecution true']) + (
     # QUANTUM=<seconds>: cores synchronise every quantum (Renode default 0.0001).
-    [f'emulation SetGlobalQuantum "{__import__("os").environ["QUANTUM"]}"'] if __import__('os').environ.get('QUANTUM') else []) + [
+    [f'emulation SetGlobalQuantum "{__import__("os").environ["QUANTUM"]}"'] if __import__('os').environ.get('QUANTUM') else []) + (
+    # Renode keeps virtual time from running ahead of the host clock by default; ADVANCE=1 runs flat
+    # out (for measuring the emulator's own speed).
+    ['emulation SetGlobalAdvanceImmediately true'] if __import__('os').environ.get('ADVANCE') == '1' else []) + [
     'cpu PerformanceInMips 200',
     'btc PerformanceInMips 100',
     'bth PerformanceInMips 100',
