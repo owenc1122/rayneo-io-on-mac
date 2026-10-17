@@ -148,6 +148,7 @@ class RnlinkPhone:
         self.say, self.send, self.central = say, send, central
         self.notif_demo = bool(os.environ.get('NOTIF_DEMO'))
         self.record_demo = bool(os.environ.get('RECORD_DEMO'))
+        self.settings_demo = bool(os.environ.get('SETTINGS_DEMO'))
         self.started = False
         self.dev_info_done = False
         self.authed = False
@@ -380,6 +381,13 @@ class RnlinkPhone:
         self.push_general_setting('crown_config', value=direction,
                                   data={'double': double, 'longPress': long_press})
 
+    def set_wakeup_config(self, headup=1, headup_degree=20, crown=1):
+        # wakeup_config -> SysStateMonitor::setWakeupConfig: headup_switch enables head-up (raise-to-wake)
+        # via the IMU; headup_degree is the pitch threshold; crown_switch enables crown wake.
+        self.push_general_setting('wakeup_config',
+                                  data={'headup_switch': headup, 'headup_degree': headup_degree,
+                                        'crown_switch': crown})
+
     def on_rnlink_cmd(self, cmd, data):
         if cmd == 0x11:                        # glasses dev-info reply
             info = {tag: val for tag, val in tlv_iter(data)}
@@ -401,6 +409,9 @@ class RnlinkPhone:
                     # Bind the crown double-click to "start recording" (action 3) so a double-click
                     # starts an on-glasses recording (default double-click is the AI assistant).
                     self.set_crown_config(double=3)
+                if getattr(self, 'settings_demo', False):
+                    # Settings sync (phone -> glasses): enable head-up (raise-to-wake) via wakeup_config.
+                    self.set_wakeup_config(headup=1, headup_degree=20, crown=1)
                 if getattr(self, 'notif_demo', False):
                     # Notification channel = business 0x15; "type" 1 = add/display (2 remove, 3 update).
                     self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',
