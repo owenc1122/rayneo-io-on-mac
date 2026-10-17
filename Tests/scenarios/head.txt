@@ -1,0 +1,21 @@
+# Head motion through the BTH IMU (headMotion drives the LSM6DSO32 stand-in in virtual time).
+lcdc SaveFrame @OUT/shot-0-home.pgm
+# A crown press moves the state machine from LIGHT_SLEEP to RUNNING, which enables the IMU.
+gpio0 Pulse 1 false 120
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-0b-awake.pgm
+headMotion Nod
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-1-nod.pgm
+headMotion Shake
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-2-shake.pgm
+headMotion Pose 30 0
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-3-up.pgm
+headMotion Pose -35 0
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-4-down.pgm
+headMotion Pose 0 0
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-5-level.pgm

@@ -55,8 +55,8 @@ The unmodified stock firmware **boots to its real home screen, responds to the c
 | Bluetooth (BLE) | Partial | Baseband timing model: advertising, page timeouts and reconnect retries run like hardware. A virtual phone (`scripts/ble-peer.py`) connects over the link layer, discovers GATT and receives rnlink frames; the phone side of rnlink is not implemented yet, so phone features still wait for the app |
 | Bluetooth classic (SPP, iAP2, A2DP, HFP) | Not started | iAP2 on a real iPhone also needs the MFi authentication chip, which an emulator cannot sign |
 | Audio | Partial | The HiFi4 DSP is not executed; its AP-facing contract (mailbox, rpmsg, smf streams) is implemented. Recording delivers Mac or file audio to the firmware as Opus; playback is decoded to the Mac speaker. Wake word and noise suppression are not reproduced |
-| Sensors | Partial | Ambient light (W1160) and magnetometer (MMC5603NJ) are detected; the IMU is active and can be driven from the host (`headMotion`), but head gestures are not verified yet; wear sensor and Wi-Fi are not modelled |
-| Speed | Slow | About 1/8 of real time; boot to home takes about 2 minutes. Cores run serially in one emulation thread |
+| Sensors | Partial | Ambient light (W1160) and magnetometer (MMC5603NJ) are detected. The IMU (own LSM6DSO32 model) delivers FIFO data to the BTH head-posture monitor through the BTH GPIO interrupt path and can be driven from the host (`headMotion`). Head-up wake (an app setting, off by default) and nod/shake (enabled by the firmware only in contexts such as calls) still need the phone side to verify. The iO has no wear sensor. Wi-Fi is not modelled |
+| Speed | Slow | About 1/8 of real time; boot to home takes about 2 minutes. Cores run serially in one emulation thread (needs Renode 1.17.0+20261016, `scripts/get-renode.sh`) |
 | Calibration | Unverified | Several register, ID and clock values are inferred from firmware, not measured on hardware |
 
 The detailed engineering log lives in [`docs/DEV-NOTES.md`](docs/DEV-NOTES.md).
@@ -70,7 +70,7 @@ git clone https://github.com/owenc1122/rayneo-io-on-mac.git && cd rayneo-io-on-m
 
 sh scripts/setup-tools.sh                    # one-time: Python venv with littlefs-python and fonttools
 sh scripts/prepare-fonts.sh /path/to/RayNeo\ AI.app   # glasses fonts from your own RayNeo AI app
-# Renode: put it at .local/renode/Renode.app, or export RENODE=/path/to/renode
+sh scripts/get-renode.sh                     # Renode 1.17.0+20261016 into .local/renode (or export RENODE=...)
 
 FONTS=.local/fonts-factory sh scripts/emulate.sh <ota-files-dir> 30 .local/runs/demo   # headless run
 SCENARIO=Tests/scenarios/crown.txt FONTS=.local/fonts-factory sh scripts/emulate.sh <ota-files-dir> 20 .local/runs/crown
@@ -156,8 +156,8 @@ Original code is released under the [MIT License](LICENSE). Renode is MIT licens
 | 蓝牙（BLE） | 部分 | 基带时序模型：广播、寻呼超时、回连重试按硬件节奏运行。虚拟手机（`scripts/ble-peer.py`）能在链路层连上、发现 GATT 并收到 rnlink 帧；手机端 rnlink 协议还没实现，依赖手机的功能仍在等待 App |
 | 经典蓝牙（SPP、iAP2、A2DP、HFP） | 未开始 | 真 iPhone 的 iAP2 还需要 MFi 认证芯片签名，模拟器无法产生 |
 | 音频 | 部分 | 不执行 HiFi4 DSP，而是实现它对 AP 的接口（邮箱、rpmsg、smf 流）。录音把 Mac 或文件的声音以 Opus 送入固件，播放解码到 Mac 扬声器；唤醒词与降噪未复现 |
-| 传感器 | 部分 | 光感（W1160）、磁力计（MMC5603NJ）已被识别；IMU 已激活、可由主机驱动（`headMotion`），头部手势尚未验证；佩戴检测、Wi‑Fi 未建模 |
-| 速度 | 慢 | 约为实时的 1/8，开机到桌面约 2 分钟；四个核在同一模拟线程中串行执行 |
+| 传感器 | 部分 | 光感（W1160）、磁力计（MMC5603NJ）已被识别。IMU（自建 LSM6DSO32 模型）经 BTH 的 GPIO 中断把 FIFO 数据送进颈部姿态监测，可由主机驱动（`headMotion`）。抬头亮屏（App 开关，默认关）和点头/摇头（固件只在来电等场景开启）要等手机端才能验证。iO 没有佩戴传感器。Wi‑Fi 未建模 |
+| 速度 | 慢 | 约为实时的 1/8，开机到桌面约 2 分钟；四个核串行执行（需 Renode 1.17.0+20261016，`scripts/get-renode.sh`） |
 | 校准 | 未验证 | 多处寄存器、ID、时钟值从固件推断，未经实机测量 |
 
 详细开发记录见 [`docs/DEV-NOTES.md`](docs/DEV-NOTES.md)。

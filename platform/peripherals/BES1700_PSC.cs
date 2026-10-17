@@ -22,32 +22,48 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         {
             banks = new[] { gpio0, gpio1, gpio2 };
             foreach(var g in banks) if(g != null) g.PendingChanged += Update;
-            IRQ = new GPIO();
+            IRQ = new GPIO(); BthIRQ = new GPIO();
         }
         public long Size => 0x1000;
         public GPIO IRQ { get; private set; }
+        // The BTH has its own enable/status words (BTH image table 0x2c0eff18: status 0x138/0x1b8/0x1dc,
+        // enable 0x12c/0x1b4/0x1d8) and NVIC line 2 (its hal_gpio_setup_irq), e.g. for the IMU INT1 pin.
+        public GPIO BthIRQ { get; private set; }
         public uint ReadDoubleWord(long offset)
         {
+            if(Trace && System.Array.IndexOf(StatusRegs, offset) < 0) Antmicro.Renode.Logging.Logger.Log(Antmicro.Renode.Logging.LogLevel.Info, "psc rd 0x{0:X3}", offset);
             int s = System.Array.IndexOf(StatusRegs, offset);
             if(s >= 0) return banks[s] == null ? 0 : banks[s].Pending & Get(EnableRegs[s]);
+            int b = System.Array.IndexOf(BthStatusRegs, offset);
+            if(b >= 0) return banks[b] == null ? 0 : banks[b].Pending & Get(BthEnableRegs[b]);
             return Get(offset);
         }
+        public bool Trace { get; set; }
         public void WriteDoubleWord(long offset, uint value)
         {
-            if(System.Array.IndexOf(StatusRegs, offset) >= 0) return;   // status is derived from the GPIO banks
+            if(Trace) Antmicro.Renode.Logging.Logger.Log(Antmicro.Renode.Logging.LogLevel.Info, "psc wr 0x{0:X3} = 0x{1:X8}", offset, value);
+            if(System.Array.IndexOf(StatusRegs, offset) >= 0 || System.Array.IndexOf(BthStatusRegs, offset) >= 0) return;   // derived from the GPIO banks
             values[offset] = value;
-            if(System.Array.IndexOf(EnableRegs, offset) >= 0) Update();
+            if(System.Array.IndexOf(EnableRegs, offset) >= 0 || System.Array.IndexOf(BthEnableRegs, offset) >= 0) Update();
         }
-        public void Reset() { values.Clear(); IRQ.Unset(); }
+        public void Reset() { values.Clear(); IRQ.Unset(); BthIRQ.Unset(); }
         private void Update()
         {
             bool any = false;
-            for(int i = 0; i < 3; i++) if(banks[i] != null && (banks[i].Pending & Get(EnableRegs[i])) != 0) any = true;
+            bool bth = false;
+            for(int i = 0; i < 3; i++) {
+                if(banks[i] == null) continue;
+                if((banks[i].Pending & Get(EnableRegs[i])) != 0) any = true;
+                if((banks[i].Pending & Get(BthEnableRegs[i])) != 0) bth = true;
+            }
             IRQ.Set(any);
+            BthIRQ.Set(bth);
         }
         private uint Get(long o) { return values.TryGetValue(o, out var v) ? v : 0; }
         private static readonly long[] EnableRegs = { 0x0fc, 0x1a4, 0x1c8 };
         private static readonly long[] StatusRegs = { 0x108, 0x1a8, 0x1cc };
+        private static readonly long[] BthEnableRegs = { 0x12c, 0x1b4, 0x1d8 };
+        private static readonly long[] BthStatusRegs = { 0x138, 0x1b8, 0x1dc };
         private readonly BES1700_GPIO[] banks;
         private readonly Dictionary<long, uint> values = new Dictionary<long, uint>();
     }

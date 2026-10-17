@@ -18,7 +18,7 @@ namespace Antmicro.Renode.Peripherals.Video
     public class BES1700_LCDC : BES1700_RegisterBank
     {
         public const int EyeWidth=540, EyeHeight=280, RowBytes=302;
-        public BES1700_LCDC(IMachine machine,BES1700_GPIO panel,string capturePath=null):base(machine) {this.panel=panel;this.machine=machine;this.capturePath=capturePath;IRQ=new GPIO();}
+        public BES1700_LCDC(IMachine machine,BES1700_GPIO panel,string capturePath=null):base(machine) {this.panel=panel;this.machine=machine;this.capturePath=capturePath;IRQ=new GPIO();panel.OutputChanged+=OnPanelOutput;}
         public GPIO IRQ {get; private set;}
         public uint CompletedFrames {get; private set;}
         public string FrameImagePath {get; set;}
@@ -114,11 +114,23 @@ namespace Antmicro.Renode.Peripherals.Video
                 else flushTimer.Change(40,System.Threading.Timeout.Infinite);
             }
         }
+        // Panel supplies: iv_1v8_en/iv_1v8_disable drive pin 45 (GPIO1 bit 13). With the panel unpowered
+        // (iv_panel_screen_off: auto screen-off, sleep) the eyes show nothing, like the real waveguide.
+        private bool PanelPowered => (panel.Output & (1u<<13)) != 0;
+        private bool lastPowered=true;
+        private void OnPanelOutput()
+        {
+            bool powered=PanelPowered;
+            if(powered==lastPowered) return;
+            lastPowered=powered;
+            if(FrameImagePath!=null) lock(frameLock) { WriteFrame(FrameImagePath); lastWrite=System.Diagnostics.Stopwatch.GetTimestamp(); }
+        }
         private void WriteFrame(string path)
         {
             var header=System.Text.Encoding.ASCII.GetBytes(string.Format("P5\n{0} {1}\n255\n",2*EyeWidth,EyeHeight));
             string temporary=path+".tmp";
-            using(var stream=System.IO.File.Create(temporary)) {stream.Write(header,0,header.Length);stream.Write(canvas,0,canvas.Length);}
+            var pixels=lastPowered ? canvas : new byte[canvas.Length];
+            using(var stream=System.IO.File.Create(temporary)) {stream.Write(header,0,header.Length);stream.Write(pixels,0,pixels.Length);}
             if(System.IO.File.Exists(path)) System.IO.File.Replace(temporary,path,null);
             else System.IO.File.Move(temporary,path);
         }
