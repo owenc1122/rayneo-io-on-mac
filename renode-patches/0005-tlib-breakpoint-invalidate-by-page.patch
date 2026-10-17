@@ -1,0 +1,18 @@
+diff --git a/exec.c b/exec.c
+index 39a10539..3f0e18d7 100644
+--- a/exec.c
++++ b/exec.c
+@@ -1075,6 +1075,13 @@ static void breakpoint_invalidate(CPUState *env, target_ulong pc)
+     TranslationBlock *tb;
+     tb_page_addr_t physical_addr;
+ 
++#ifdef TARGET_PROTO_ARM_M
++    /* M-profile cores do not translate addresses, so every block containing `pc` is linked to the
++     * physical page of `pc`: invalidate through that page's list instead of scanning every block. */
++    tb_invalidate_phys_page_range_inner(pc, pc + 1, 0, 0);
++    return;
++#endif
++
+     for(int i = 0; i < nb_tbs; ++i) {
+         tb = &tbs[i];
+         if(pc < tb->pc || tb->pc + tb->size < pc) {

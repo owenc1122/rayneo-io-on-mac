@@ -1,0 +1,31 @@
+diff --git a/exec.c b/exec.c
+index 39a10539..3f0e18d7 100644
+--- a/exec.c
++++ b/exec.c
+@@ -768,6 +768,26 @@ void helper_mark_tbs_as_dirty(CPUState *env, target_ulong pc, uint32_t access_wi
+         append_dirty_address(phys_pc);
+     }
+ 
++    /* Pages written often get the same code bitmap the SMC path uses (every byte covered by a block on the
++     * page). A store that touches no covered byte cannot overlap a block, so the list walk can be skipped. */
++    if(p->code_bitmap == NULL && p->first_tb != NULL && ++p->code_write_count >= SMC_BITMAP_USE_THRESHOLD) {
++        build_page_bitmap(p);
++    }
++    if(p->code_bitmap != NULL) {
++        uint32_t offset = phys_pc & ~TARGET_PAGE_MASK;
++        uint32_t end = offset + access_width > TARGET_PAGE_SIZE ? TARGET_PAGE_SIZE : offset + access_width;
++        bool covered = false;
++        for(uint32_t i = offset; i < end; i++) {
++            if(p->code_bitmap[i >> 3] & (1 << (i & 7))) {
++                covered = true;
++                break;
++            }
++        }
++        if(!covered) {
++            return;
++        }
++    }
++
+     //  Below code is a simplified version of the `tb_invalidate_phys_page_range_inner` search
+     tb = p->first_tb;
+     while(tb != NULL) {

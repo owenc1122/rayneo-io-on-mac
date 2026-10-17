@@ -3,7 +3,8 @@
 # tlib patches in renode-patches/, for macOS arm64. Result: .local/renode-build/renode, which emulate.sh,
 # check-models.sh and the app (from a development checkout) use in place of .local/renode/Renode.app.
 #
-# The patches only make tlib faster (see each patch); guest-visible behaviour is unchanged.
+# The patches only make tlib and the time/hook plumbing faster (see each patch); guest-visible behaviour is
+# unchanged.
 # Needs git, curl and Xcode command line tools (clang). Downloads the .NET 8 SDK and CMake into .local/tools
 # when they are not on PATH. A first run fetches ~1 GB of sources and takes ~10 minutes.
 set -eu
@@ -49,11 +50,18 @@ if [ ! -d "$src/lib/resources/.git" ]; then
 fi
 git -C "$src/lib/resources" checkout -q "$resources_commit"
 
-# Patches: reset tlib to the pinned state, then apply ours.
-tlib=$src/src/Infrastructure/src/Emulator/Cores/tlib
+# Patches: reset tlib and the C# infrastructure to the pinned state, then apply ours in order
+# (NNNN-tlib-*.patch to tlib, NNNN-infrastructure-*.patch to src/Infrastructure).
+infra=$src/src/Infrastructure
+tlib=$infra/src/Emulator/Cores/tlib
 git -C "$tlib" checkout -q -- .
+git -C "$infra" checkout -q -- .
 for p in "$root"/renode-patches/*.patch; do
-    git -C "$tlib" apply "$p"
+    case "$(basename "$p")" in
+        *-tlib-*) git -C "$tlib" apply "$p" ;;
+        *-infrastructure-*) git -C "$infra" apply "$p" ;;
+        *) echo "Unknown patch target: $p" >&2; exit 1 ;;
+    esac
 done
 
 (cd "$src" && ./build.sh --no-gui --skip-fetch)

@@ -52,11 +52,11 @@ The unmodified stock firmware **boots to its real home screen, responds to the c
 | Crown | Working | Press, double press, long press and rotation are handled by the firmware itself (`Tests/scenarios/`) |
 | Timers, I2C, GPU, display | Working | SP804 hwtimers, a DesignWare I2C model, VGLite command execution, two-eye scan-out |
 | Persistence | Working | The app saves NOR and NAND on quit and restores them, so settings and pairing survive; "Factory reset" clears them |
-| Bluetooth (BLE) | Partial | Baseband timing model; a virtual Android phone (`scripts/ble-peer.py`) connects, passes the stock rnlink handshake and authentication, and drives the real screens: weather and to-do cards on the home page, live captions (bilingual) in the subtitle app. Notifications, recorder sync, music, navigation, AI, prompter, settings sync and OTA are still being implemented |
+| Bluetooth (BLE) | Partial | Baseband timing model; a virtual Android phone (`scripts/ble-peer.py`) connects, passes the stock rnlink handshake and authentication, and drives the real screens: weather and to-do cards, live captions (bilingual), notification banners and the AI assistant (question and answer cards). Recorder sync, music, navigation, prompter, settings sync and OTA are still being implemented |
 | Bluetooth classic (SPP, iAP2, A2DP, HFP) | Not started | iAP2 on a real iPhone also needs the MFi authentication chip, which an emulator cannot sign |
 | Audio | Partial | The HiFi4 DSP is not executed; its AP-facing contract is implemented. Recording delivers Mac or file audio to the firmware as Opus, playback goes to the Mac speaker, and the 「小雷小雷」 voice wake runs through the stock BTH VAD plus a stand-in second stage (confusable phrases do not wake it). Noise suppression is not the stock algorithm |
 | Sensors | Partial | Ambient light (W1160) and magnetometer (MMC5603NJ) are detected. The IMU (own LSM6DSO32 model) delivers FIFO data to the BTH head-posture monitor through the BTH GPIO interrupt path and can be driven from the host (`headMotion`). Head-up wake (an app setting, off by default) and nod/shake (enabled by the firmware only in contexts such as calls) still need the phone side to verify. The iO has no wear sensor. Wi-Fi is not modelled |
-| Speed | Near real time | Idle cores really sleep; boot runs at real time and busy UI phases at about 1/1.4. Cores run serially in one emulation thread (needs Renode 1.17.0+20261016, `scripts/get-renode.sh`) |
+| Speed | Real time | Idle cores really sleep; boot and UI animations run at real time on the patched Renode build (`scripts/build-renode.sh`; the stock 1.17.0+20261016 download from `scripts/get-renode.sh` also works, a little slower). Cores run serially in one emulation thread |
 | Calibration | Unverified | Several register, ID and clock values are inferred from firmware, not measured on hardware |
 
 The detailed engineering log lives in [`docs/DEV-NOTES.md`](docs/DEV-NOTES.md).
@@ -153,11 +153,11 @@ Original code is released under the [MIT License](LICENSE). Renode is MIT licens
 | 表冠 | 可用 | 单击、双击、长按、旋转都由固件自己处理（`Tests/scenarios/`） |
 | 定时器、I2C、GPU、显示 | 可用 | SP804 硬件定时器、DesignWare I2C、VGLite 绘制、双眼扫描输出 |
 | 状态保存 | 可用 | 应用退出时保存 NOR 和 NAND，下次恢复；「恢复出厂设置」清除 |
-| 蓝牙（BLE） | 部分 | 基带时序模型；虚拟安卓手机（`scripts/ble-peer.py`）通过原厂 rnlink 握手与认证，驱动真实界面：主页天气和待办卡片、字幕 App 的中英双语实时字幕。通知、录音同步、音乐、导航、AI、提词器、设置同步、OTA 仍在实现 |
+| 蓝牙（BLE） | 部分 | 基带时序模型；虚拟安卓手机（`scripts/ble-peer.py`）通过原厂 rnlink 握手与认证，驱动真实界面：天气和待办卡片、中英双语实时字幕、通知横幅、AI 助手（提问与回答卡片）。录音同步、音乐、导航、提词器、设置同步、OTA 仍在实现 |
 | 经典蓝牙（SPP、iAP2、A2DP、HFP） | 未开始 | 真 iPhone 的 iAP2 还需要 MFi 认证芯片签名，模拟器无法产生 |
 | 音频 | 部分 | 不执行 HiFi4 DSP，而是实现其对 AP 的接口。录音把 Mac 或文件的声音以 Opus 送入固件，播放到 Mac 扬声器；「小雷小雷」语音唤醒经原厂 BTH VAD 加替身第二级完成（相近词不会误唤醒）。降噪不是原厂算法 |
 | 传感器 | 部分 | 光感（W1160）、磁力计（MMC5603NJ）已被识别。IMU（自建 LSM6DSO32 模型）经 BTH 的 GPIO 中断把 FIFO 数据送进颈部姿态监测，可由主机驱动（`headMotion`）。抬头亮屏（App 开关，默认关）和点头/摇头（固件只在来电等场景开启）要等手机端才能验证。iO 没有佩戴传感器。Wi‑Fi 未建模 |
-| 速度 | 接近实时 | 空闲时各核真正睡眠；开机为实时，界面繁忙时约为实时的 1/1.4；四个核串行执行（需 Renode 1.17.0+20261016，`scripts/get-renode.sh`） |
+| 速度 | 实时 | 空闲时各核真正睡眠；开机和界面动画在打过补丁的 Renode（`scripts/build-renode.sh`）上为实时（`scripts/get-renode.sh` 下载的 1.17.0+20261016 也能用，稍慢）。四个核串行执行 |
 | 校准 | 未验证 | 多处寄存器、ID、时钟值从固件推断，未经实机测量 |
 
 详细开发记录见 [`docs/DEV-NOTES.md`](docs/DEV-NOTES.md)。

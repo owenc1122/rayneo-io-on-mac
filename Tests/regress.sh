@@ -11,23 +11,25 @@ out=${2:-$root/.local/regress/$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$out"; out=$(cd "$out" && pwd)
 ta=$root/.local/test-audio
 export FONTS=${FONTS:-$root/.local/fonts-factory}
-base=${PORT_BASE:-24000}
-peer_base=${PEER_BASE:-24100}
+# Free local TCP ports, so several regressions (other checkouts, other sessions) can run at once.
+free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
 
 run() {  # run <name> <seconds> <scenario> [env...]
     name=$1 secs=$2 scen=$3; shift 3
-    (env "$@" SCENARIO="$root/Tests/scenarios/$scen" RENODE_BATCH_PORT=$((base + $(echo "$name" | cksum | cut -c1-3) % 90)) \
+    (env "$@" SCENARIO="$root/Tests/scenarios/$scen" RENODE_BATCH_PORT=$(free_port) \
         sh scripts/emulate.sh "$fw" "$secs" "$out/$name" "${EXTRA:-}" > /dev/null 2>&1) &
     jobs_pids="${jobs_pids:-} $!"
 }
-phone() {  # phone <name> <seconds> <scenario>: with the virtual BLE phone
-    name=$1; port=$((peer_base + $(echo "$name" | cksum | cut -c1-3) % 90))
+phone() {  # phone <name> <seconds> <scenario> [PEER_ENV=val ...]: with the virtual BLE phone.
+           # Any trailing VAR=val args set env on ble-peer.py (so a scenario can enable its demo push).
+    name=$1 secs=$2 scen=$3; shift 3
+    port=$(free_port)
     mkdir -p "$out/$name"
-    python3 scripts/ble-peer.py --port "$port" --log "$out/$name/peer.log" > /dev/null 2>&1 &
+    env "$@" python3 scripts/ble-peer.py --port "$port" --log "$out/$name/peer.log" > /dev/null 2>&1 &
     peer_pids="${peer_pids:-} $!"
     sed "s/PeerPort [0-9]*/PeerPort $port/" Tests/scenarios/ble-peer.resc > "$out/$name.peer.resc"
     sleep 1
-    EXTRA="$out/$name.peer.resc" run "$@" BOND_ADDR=c0:c0:ff:ee:00:01 BOND_OS=android
+    EXTRA="$out/$name.peer.resc" run "$name" "$secs" "$scen" BOND_ADDR=c0:c0:ff:ee:00:01 BOND_OS=android
 }
 
 if [ -z "${SKIP_RUN:-}" ]; then
@@ -40,7 +42,7 @@ run wake 16 wake.txt VOICE_WAKE=1 MIC="$ta/wake-xiaolei.wav" MIC_LOOP=0
 run wakeneg 16 wake-negative.txt VOICE_WAKE=1 MIC="$ta/confusables.wav" MIC_LOOP=0
 phone weather 30 bt-weather.txt
 phone subtitle 30 bt-subtitle.txt
-phone notification 30 bt-notification.txt
+phone notification 30 bt-notification.txt NOTIF_DEMO=1
 phone assistant 30 bt-assistant.txt
 for p in $jobs_pids; do wait "$p"; done
 kill $peer_pids 2>/dev/null
@@ -64,5 +66,10 @@ check "wake-negative: no wake" "[ \$(n wakeneg 'wake word confirmed') -eq 0 ]"
 for r in weather subtitle notification assistant; do
     check "$r: rnlink auth" "[ \$(n $r 'auth success') -gt 0 ]"
 done
+# On-screen checks: a firmware log line that only appears once the phone-driven content is rendered.
+check "weather: data applied on dashboard" "[ \$(n weather 'json_len=136') -gt 0 ]"
+check "subtitle: caption rendered (TranslationTextUpdate)" "[ \$(n subtitle 'onAction - TranslationTextUpdate') -gt 0 ]"
+check "notification: banner shown on screen" "[ \$(n notification 'Notification layer shown') -gt 0 ]"
+check "assistant: answer card rendered (ChatDomain)" "[ \$(n assistant 'ChatDomain::onMessageReceived') -gt 0 ]"
 echo "results in $out"
 exit $fail
