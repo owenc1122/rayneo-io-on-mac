@@ -147,6 +147,7 @@ class RnlinkPhone:
         import os
         self.say, self.send, self.central = say, send, central
         self.notif_demo = bool(os.environ.get('NOTIF_DEMO'))
+        self.record_demo = bool(os.environ.get('RECORD_DEMO'))
         self.started = False
         self.dev_info_done = False
         self.authed = False
@@ -362,6 +363,23 @@ class RnlinkPhone:
         self.say('rnlink -> weather %s' % msg)
         self.tx(0x0f, pb_msg(0x12, message=msg))
 
+    def push_general_setting(self, cmd, value=0, mode=0, data=''):
+        import json
+        # GeneralSetting = LAUNCHER_CMD (0x0f) PbMsg type 5 -> RnLinkMsgProcessor::handleGeneralSettingCommand.
+        # JSON {cmd, payload:{value, mode, data}}; data is a nested JSON string. Sub-commands: crown_config,
+        # head_gestures, wakeup_config, display_config, auto_lock_time, device_name_change, ...
+        if not isinstance(data, str):
+            data = json.dumps(data)
+        msg = json.dumps({'cmd': cmd, 'payload': {'value': value, 'mode': mode, 'data': data}})
+        self.say('rnlink -> GeneralSetting %s' % msg)
+        self.tx(0x0f, pb_msg(5, message=msg))
+
+    def set_crown_config(self, double=0, long_press=1, direction=1):
+        # crown_config: payload.value=direction, data.double / data.longPress. The double-click action
+        # maps via InputEventMonitor::handleQuickLaunch: 0 assistant, 2 focus mode, 3 start recording, ...
+        self.push_general_setting('crown_config', value=direction,
+                                  data={'double': double, 'longPress': long_press})
+
     def on_rnlink_cmd(self, cmd, data):
         if cmd == 0x11:                        # glasses dev-info reply
             info = {tag: val for tag, val in tlv_iter(data)}
@@ -379,6 +397,10 @@ class RnlinkPhone:
                 # voice assistant as available (otherwise it shows "连接手机 App 后重试").
                 import json as _j
                 self.tx(0x0d, pb_msg(31, message=_j.dumps({'major': 5, 'minor': 0})))
+                if getattr(self, 'record_demo', False):
+                    # Bind the crown double-click to "start recording" (action 3) so a double-click
+                    # starts an on-glasses recording (default double-click is the AI assistant).
+                    self.set_crown_config(double=3)
                 if getattr(self, 'notif_demo', False):
                     # Notification channel = business 0x15; "type" 1 = add/display (2 remove, 3 update).
                     self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',

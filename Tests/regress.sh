@@ -44,6 +44,7 @@ phone weather 30 bt-weather.txt
 phone subtitle 30 bt-subtitle.txt
 phone notification 30 bt-notification.txt NOTIF_DEMO=1
 phone assistant 30 bt-assistant.txt
+phone btrecord 25 bt-record.txt RECORD_DEMO=1
 for p in $jobs_pids; do wait "$p"; done
 kill $peer_pids 2>/dev/null
 fi
@@ -52,7 +53,7 @@ fail=0
 check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fail=1; fi; }
 n() { c=$(grep -ac "$2" "$out/$1/boot.log" 2>/dev/null); echo "${c:-0}"; }
 shots() { ls "$out/$1" 2>/dev/null | grep -c '^shot-'; }
-for r in crown rotate bt record speaker wake wakeneg weather subtitle notification assistant; do
+for r in crown rotate bt record speaker wake wakeneg weather subtitle notification assistant btrecord; do
     check "$r: no firmware assert" "[ \$(n $r 'dump_assert_info: Assert') -eq 0 ]"
 done
 check "crown: 10 screenshots" "[ \$(shots crown) -eq 10 ]"
@@ -63,7 +64,7 @@ check "record: correlation ${corr:-none} >= 0.85" "python3 -c 'import sys; sys.e
 check "speaker: tone captured" "python3 scripts/check-audio.py '$out/speaker' 2>&1 | grep -q 'peak 32768'"
 check "wake: 小雷小雷 confirmed" "[ \$(n wake 'wake word confirmed') -gt 0 ]"
 check "wake-negative: no wake" "[ \$(n wakeneg 'wake word confirmed') -eq 0 ]"
-for r in weather subtitle notification assistant; do
+for r in weather subtitle notification assistant btrecord; do
     check "$r: rnlink auth" "[ \$(n $r 'auth success') -gt 0 ]"
 done
 # On-screen checks: a firmware log line that only appears once the phone-driven content is rendered.
@@ -71,5 +72,6 @@ check "weather: data applied on dashboard" "[ \$(n weather 'json_len=136') -gt 0
 check "subtitle: caption rendered (TranslationTextUpdate)" "[ \$(n subtitle 'onAction - TranslationTextUpdate') -gt 0 ]"
 check "notification: banner shown on screen" "[ \$(n notification 'Notification layer shown') -gt 0 ]"
 check "assistant: answer card rendered (ChatDomain)" "[ \$(n assistant 'ChatDomain::onMessageReceived') -gt 0 ]"
+check "btrecord: phone-configured double-click starts recording" "[ \$(n btrecord 'startRecordingSync') -gt 0 ]"
 echo "results in $out"
 exit $fail

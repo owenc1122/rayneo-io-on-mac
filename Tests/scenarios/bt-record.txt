@@ -1,0 +1,17 @@
+# Virtual phone binds the crown double-click to "start recording" (crown_config); a double-click on the
+# home page then starts an on-glasses recording. Duration arg covers boot + connect + config.
+gpio0 Pulse 1 false 120
+emulation RunFor "3"
+gpio0 Pulse 1 false 120
+emulation RunFor "0.2"
+gpio0 Pulse 1 false 120
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-record-1.pgm
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-record-2.pgm
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-record-3.pgm
+emulation RunFor "1.5"
+lcdc SaveFrame @OUT/shot-record-4.pgm
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-record-5.pgm
