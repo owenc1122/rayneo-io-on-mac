@@ -1,0 +1,3 @@
+# Just boot and let the classic-BT host stack come up (SPP server, page scan). Capture the BTC
+# activity trace so we can reverse the classic (mode 1) exchange-memory layout.
+emulation RunFor "40"
