@@ -1,0 +1,5 @@
+# Virtual phone + weather push. Wake the screen (crown) before capturing so it isn't auto-off.
+emulation RunFor "35"
+gpio0 Pulse 1 false 120
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-weather.pgm

@@ -1,0 +1,11 @@
+# Connected (virtual phone) + crown navigation into an app, to test phone-dependent apps.
+emulation RunFor "33"
+gpio0 Pulse 1 false 120
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-applist.pgm
+i2c0.ots Rotate 400
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-app2.pgm
+gpio0 Pulse 1 false 120
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-open.pgm
