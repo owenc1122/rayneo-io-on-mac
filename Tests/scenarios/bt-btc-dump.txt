@@ -1,0 +1,5 @@
+# Boot past BT controller init, then dump the BTC core code + RAM so the rwip classic baseband
+# can be reversed in Ghidra.
+emulation RunFor "35"
+python "data = machine.SystemBus.ReadBytes(0x60400000, 0x100000); f=open('/Users/owen/Documents/RayNeo-ghidra/btcdump/btccode.bin','wb'); f.write(bytearray(data)); f.close(); print('[AP:out] DUMPED btccode %d' % len(data))"
+python "data = machine.SystemBus.ReadBytes(0x68000000, 0x40000); f=open('/Users/owen/Documents/RayNeo-ghidra/btcdump/btcram.bin','wb'); f.write(bytearray(data)); f.close(); print('[AP:out] DUMPED btcram %d' % len(data))"
