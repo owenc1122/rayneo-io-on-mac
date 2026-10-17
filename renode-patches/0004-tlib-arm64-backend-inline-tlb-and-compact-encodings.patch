@@ -1,0 +1,299 @@
+diff --git a/tcg/aarch64/tcg-target.c b/tcg/aarch64/tcg-target.c
+index e69bddd8..4bcd0ad7 100644
+--- a/tcg/aarch64/tcg-target.c
++++ b/tcg/aarch64/tcg-target.c
+@@ -278,6 +278,7 @@ static inline void tcg_out_b_cond_noaddr(TCGContext *s)
+ //  Value used for addend when nothing extra is needed by the reloc
+ #define TCG_UNUSED_CONSTANT 31337
+ static inline void tcg_out_movi64(TCGContext *s, int reg1, tcg_target_long imm);
++static inline void tcg_out_movi64_fixed(TCGContext *s, int reg1, tcg_target_long imm);
+ static inline void tcg_out_goto_label(TCGContext *s, int cond, int label_index)
+ {
+     tcg_debug_assert(label_index < TCG_MAX_LABELS);
+@@ -302,7 +303,7 @@ static inline void tcg_out_goto_label(TCGContext *s, int cond, int label_index)
+                 //  So we use a unconditional branch, whith a inverted conditonal to jump over it
+                 tcg_out_b_cond(s, tcg_invert_cond(cond),
+                                24);  //  24 becase we want to jump over 4 moves (for a 64-bit load immediate) and one branch
+-                tcg_out_movi64(s, TCG_TMP_REG, l->u.value);
++                tcg_out_movi64_fixed(s, TCG_TMP_REG, l->u.value);
+                 tcg_out_br(s, TCG_TMP_REG);
+             } else {
+                 tcg_out_b_cond(s, cond, offset);
+@@ -385,7 +386,8 @@ static const int SHIFT_16 = 0b01;
+ static const int SHIFT_32 = 0b10;
+ static const int SHIFT_48 = 0b11;
+ 
+-static inline void tcg_out_movi64(TCGContext *s, int reg1, tcg_target_long imm)
++//  Always four instructions; for code that branches over a fixed-size constant load
++static inline void tcg_out_movi64_fixed(TCGContext *s, int reg1, tcg_target_long imm)
+ {
+     tcg_out32(s, 0xd2800000 | (SHIFT_0 << 21) | ((0xffff & imm) << 5) | (reg1 << 0));  //  MOVZ
+     imm = imm >> 16;
+@@ -396,11 +398,45 @@ static inline void tcg_out_movi64(TCGContext *s, int reg1, tcg_target_long imm)
+     tcg_out32(s, 0xf2800000 | (SHIFT_48 << 21) | ((0xffff & imm) << 5) | (reg1 << 0));  //  MOVK
+ }
+ 
++//  Shortest MOVZ/MOVN + MOVK sequence for a 32- or 64-bit constant
++static inline void tcg_out_movi_short(TCGContext *s, int bits, int reg1, uint64_t value)
++{
++    int halfwords = bits / 16, zeros = 0, ones = 0;
++    for(int i = 0; i < halfwords; i++) {
++        uint32_t h = (value >> (16 * i)) & 0xffff;
++        zeros += h == 0;
++        ones += h == 0xffff;
++    }
++    bool inverted = ones > zeros;
++    uint32_t skip = inverted ? 0xffff : 0;
++    uint32_t sf = bits == 64 ? 0x80000000 : 0;
++    bool first = true;
++    for(int i = 0; i < halfwords; i++) {
++        uint32_t h = (value >> (16 * i)) & 0xffff;
++        if(h == skip) {
++            continue;
++        }
++        if(first) {
++            //  MOVN writes ~(imm16 << shift), MOVZ writes imm16 << shift
++            tcg_out32(s, sf | (inverted ? 0x12800000 : 0x52800000) | (i << 21) | ((inverted ? (~h & 0xffff) : h) << 5) | reg1);
++            first = false;
++        } else {
++            tcg_out32(s, sf | 0x72800000 | (i << 21) | (h << 5) | reg1);  //  MOVK
++        }
++    }
++    if(first) {
++        tcg_out32(s, sf | (inverted ? 0x12800000 : 0x52800000) | reg1);  //  all halfwords equal: 0 or ~0
++    }
++}
++
++static inline void tcg_out_movi64(TCGContext *s, int reg1, tcg_target_long imm)
++{
++    tcg_out_movi_short(s, 64, reg1, (uint64_t)imm);
++}
++
+ static inline void tcg_out_movi32(TCGContext *s, int reg1, tcg_target_long imm)
+ {
+-    tcg_out32(s, 0x52800000 | (SHIFT_0 << 21) | ((0xffff & imm) << 5) | (reg1 << 0));  //  MOVZ
+-    imm = imm >> 16;
+-    tcg_out32(s, 0x72800000 | (SHIFT_16 << 21) | ((0xffff & imm) << 5) | (reg1 << 0));  //  MOVK
++    tcg_out_movi_short(s, 32, reg1, (uint32_t)imm);
+ }
+ 
+ static inline void tcg_out_lsr_reg(TCGContext *s, int bits, int reg_dest, int reg_src, int reg_shift)
+@@ -506,9 +542,31 @@ static inline void tcg_out_ld_reg_offset(TCGContext *s, int bits, bool sign_exte
+     }
+ }
+ 
++//  LDR/STR with an immediate offset when it fits: scaled unsigned 12-bit, else unscaled signed 9-bit (LDUR/STUR)
++static inline bool tcg_out_ldst_imm(TCGContext *s, bool load, int bits, int reg_data, int reg_base, tcg_target_long offset)
++{
++    int size_log2 = bits == 8 ? 0 : bits == 16 ? 1 : bits == 32 ? 2 : 3;
++    uint32_t size_bits = (uint32_t)size_log2 << 30;
++    if(offset >= 0 && (offset & ((1 << size_log2) - 1)) == 0 && (offset >> size_log2) < 4096) {
++        tcg_out32(s, size_bits | (load ? 0x39400000 : 0x39000000) | ((offset >> size_log2) << 10) | (reg_base << 5) | reg_data);
++        return true;
++    }
++    if(offset >= -256 && offset < 256) {
++        tcg_out32(s, size_bits | (load ? 0x38400000 : 0x38000000) | ((offset & 0x1ff) << 12) | (reg_base << 5) | reg_data);
++        return true;
++    }
++    return false;
++}
++
+ static inline void tcg_out_ld_offset(TCGContext *s, int bits, bool sign_extend, int reg_dest, int reg_base,
+                                      tcg_target_long offset)
+ {
++    if(tcg_out_ldst_imm(s, true, bits, reg_dest, reg_base, offset)) {
++        if(sign_extend) {
++            tcg_out_sign_extend(s, bits, reg_dest, reg_dest);
++        }
++        return;
++    }
+     tcg_out_movi64(s, TCG_TMP_REG, offset);
+     tcg_out_ld_reg_offset(s, bits, sign_extend, reg_dest, reg_base, TCG_TMP_REG);
+ }
+@@ -516,6 +574,10 @@ static inline void tcg_out_ld_offset(TCGContext *s, int bits, bool sign_extend,
+ //  Read a specified TCGType from base + offset into dest
+ static inline void tcg_out_ld(TCGContext *s, TCGType type, TCGReg dest, TCGReg base, tcg_target_long offset)
+ {
++    if((type == TCG_TYPE_I32 || type == TCG_TYPE_I64) &&
++       tcg_out_ldst_imm(s, true, type == TCG_TYPE_I32 ? 32 : 64, dest, base, offset)) {
++        return;
++    }
+     tcg_out_movi64(s, TCG_TMP_REG, offset);
+     switch(type) {
+         case TCG_TYPE_I32:
+@@ -555,6 +617,9 @@ static inline void tcg_out_st_reg_offset(TCGContext *s, int bits, int reg_src, i
+ 
+ static inline void tcg_out_st_offset(TCGContext *s, int bits, int reg_src, int reg_base, tcg_target_long offset)
+ {
++    if(tcg_out_ldst_imm(s, false, bits, reg_src, reg_base, offset)) {
++        return;
++    }
+     tcg_out_movi64(s, TCG_TMP_REG, offset);
+     tcg_out_st_reg_offset(s, bits, reg_src, reg_base, TCG_TMP_REG);
+ }
+@@ -564,6 +629,10 @@ static inline void tcg_out_st(TCGContext *s, TCGType type, TCGReg arg, TCGReg ar
+     //  Write the content of arg to the address in arg1 + offset
+     //  For offsets that fit in 9-bits this could be one instruction, future optimization work
+ 
++    if((type == TCG_TYPE_I32 || type == TCG_TYPE_I64) &&
++       tcg_out_ldst_imm(s, false, type == TCG_TYPE_I32 ? 32 : 64, arg, arg1, offset)) {
++        return;
++    }
+     //  Move offset into designated tmp reg
+     tcg_out_movi64(s, TCG_TMP_REG, offset);
+     switch(type) {
+@@ -616,6 +685,12 @@ static inline void tcg_out_cmp(TCGContext *s, int bits, int reg1, int reg2)
+ 
+ static inline void tcg_out_cmpi(TCGContext *s, int bits, int reg, tcg_target_long imm)
+ {
++    //  CMP (immediate) = SUBS XZR, reg, #imm; same flags as the register form for the same value
++    uint64_t k = (uint64_t)imm & (bits == 32 ? 0xffffffffull : ~0ull);
++    if((bits == 32 || bits == 64) && k < 4096 && reg != 31) {
++        tcg_out32(s, (bits == 64 ? 0xF100001F : 0x7100001F) | ((uint32_t)k << 10) | (reg << 5));
++        return;
++    }
+     //  Mov immediate into a register
+     tcg_out_movi(s, 0, TCG_TMP_REG, imm);
+     tcg_out_cmp(s, bits, reg, TCG_TMP_REG);
+@@ -677,8 +752,32 @@ static inline void tcg_out_add_reg(TCGContext *s, int bits, int reg_dest, int re
+     tcg_out_add_shift_reg(s, bits, false, reg_dest, reg1, reg2, SHIFT_LSL, 0);
+ }
+ 
++//  ADD/SUB (immediate) when the constant, or its negation, fits in 12 bits. Register 31 means SP in this
++//  encoding but XZR in the register form, so it is left to the register form.
++static inline bool tcg_out_addsub_imm12(TCGContext *s, int bits, bool sub, int reg_dest, int reg_in, tcg_target_long imm)
++{
++    if(reg_dest == 31 || reg_in == 31) {
++        return false;
++    }
++    uint64_t mask = bits == 32 ? 0xffffffffull : ~0ull;
++    uint64_t k = (uint64_t)imm & mask, neg = (0 - (uint64_t)imm) & mask;
++    uint32_t sf = bits == 64 ? 0x80000000 : 0;
++    if(k < 4096) {
++        tcg_out32(s, sf | (sub ? 0x51000000 : 0x11000000) | ((uint32_t)k << 10) | (reg_in << 5) | reg_dest);
++        return true;
++    }
++    if(neg < 4096) {
++        tcg_out32(s, sf | (sub ? 0x11000000 : 0x51000000) | ((uint32_t)neg << 10) | (reg_in << 5) | reg_dest);
++        return true;
++    }
++    return false;
++}
++
+ static inline void tcg_out_add_imm(TCGContext *s, int bits, int reg_dest, int reg_in, tcg_target_long imm)
+ {
++    if((bits == 32 || bits == 64) && tcg_out_addsub_imm12(s, bits, false, reg_dest, reg_in, imm)) {
++        return;
++    }
+     switch(bits) {
+         case 32:
+             tcg_out_movi32(s, TCG_TMP_REG, imm);
+@@ -759,6 +858,9 @@ static inline void tcg_out_sub_reg(TCGContext *s, int bits, int reg_dest, int re
+ 
+ static inline void tcg_out_sub_imm(TCGContext *s, int bits, int reg_dest, int reg_in, tcg_target_long imm)
+ {
++    if((bits == 32 || bits == 64) && tcg_out_addsub_imm12(s, bits, true, reg_dest, reg_in, imm)) {
++        return;
++    }
+     switch(bits) {
+         case 32:
+             tcg_out_movi32(s, TCG_TMP_REG, imm);
+@@ -1117,9 +1219,68 @@ static inline void tcg_out_atomic_fetch_and_add(TCGContext *s, int bits, int reg
+     }
+ }
+ 
++//  Inline TLB lookup for guest loads and stores, as the i386 backend does: on a hit the access goes straight to
++//  host memory; anything else (miss, unaligned, MMIO, one-shot or not-dirty/code pages, all of which leave extra
++//  bits in the compared TLB word) takes the helper call. Uses R0-R2, which the qemu_ld/st constraints keep free.
++//  Returns the position of the branch to patch with the miss target, or NULL when the TLB is not used.
++static inline uint8_t *tcg_out_tlb_fast_path(TCGContext *s, int s_bits, bool load, bool sign_extend, int reg_data,
++                                             int reg_addr, int mem_index, uint8_t **done_branch)
++{
++    if(!s->use_tlb || TARGET_LONG_BITS != 32) {
++        return NULL;
++    }
++    int bits = 8 << s_bits;
++    //  w0 = addr & (page mask | alignment mask)
++    tcg_out_movi32(s, TCG_TMP_REG, (uint32_t)(TARGET_PAGE_MASK | ((1 << s_bits) - 1)));
++    tcg_out_and_reg(s, 32, TCG_REG_R0, reg_addr, TCG_TMP_REG);
++    //  x1 = env + ((addr >> page bits) & (tlb size - 1)) << entry bits  (UBFX w1, addr, #page bits, #tlb bits)
++    tcg_out32(s, 0x53000000 | (TARGET_PAGE_BITS << 16) | ((TARGET_PAGE_BITS + CPU_TLB_BITS - 1) << 10) | (reg_addr << 5) | TCG_REG_R1);
++    tcg_out32(s, 0x8b000000 | (TCG_REG_R1 << 16) | (CPU_TLB_ENTRY_BITS << 10) | (TCG_AREG0 << 5) | TCG_REG_R1);
++    //  w2 = entry.addr_read / addr_write; compare with w0
++    tcg_out_ld_offset(s, 32, false, TCG_REG_R2, TCG_REG_R1,
++                      tlb_table_n_0[mem_index] + (load ? tlb_entry_addr_read : tlb_entry_addr_write));
++    tcg_out_cmp(s, 32, TCG_REG_R0, TCG_REG_R2);
++    uint8_t *miss_branch = s->code_ptr;
++    tcg_out32(s, 0x54000000 | COND_NE);  //  b.ne miss, patched by the caller
++    //  x1 = entry.addend; access [x1 + zero-extended addr]
++    tcg_out_ld_offset(s, 64, false, TCG_REG_R1, TCG_REG_R1, tlb_table_n_0[mem_index] + tlb_entry_addend);
++    static const uint32_t ld_ops[] = { 0x38600800, 0x78600800, 0xb8600800, 0xf8600800 };
++    static const uint32_t st_ops[] = { 0x38200800, 0x78200800, 0xb8200800, 0xf8200800 };
++    //  option 010 = UXTW: the guest address is the low 32 bits of reg_addr
++    tcg_out32(s, (load ? ld_ops : st_ops)[s_bits] | (reg_addr << 16) | (0b010 << 13) | (TCG_REG_R1 << 5) | reg_data);
++    if(load && sign_extend) {
++        tcg_out_sign_extend(s, bits, reg_data, reg_data);
++    }
++    if(!load) {
++        //  Same ordering guarantee as the helper path below
++        tcg_out_mb(s, TCG_MO_ST_LD);
++    }
++    *done_branch = s->code_ptr;
++    tcg_out32(s, 0x14000000);  //  b done, patched by the caller
++    return miss_branch;
++}
++
++static inline void tcg_patch_branch(uint8_t *branch, uint8_t *target, bool conditional)
++{
++    int32_t offset = (int32_t)((target - branch) >> 2);
++    uint32_t insn = *(uint32_t *)branch;
++    if(conditional) {
++        insn |= (offset & 0x7FFFF) << 5;
++    } else {
++        insn |= offset & 0x3FFFFFF;
++    }
++    *(uint32_t *)branch = insn;
++}
++
+ //  qemu_st/ld loads and stores to and from GUEST addresses, not host ones
+ static inline void tcg_out_qemu_st(TCGContext *s, int bits, int reg_data, int reg_addr, int mem_index)
+ {
++    uint8_t *done_branch = NULL;
++    int s_bits = bits == 8 ? 0 : bits == 16 ? 1 : bits == 32 ? 2 : 3;
++    uint8_t *miss_branch = tcg_out_tlb_fast_path(s, s_bits, false, false, reg_data, reg_addr, mem_index, &done_branch);
++    if(miss_branch) {
++        tcg_patch_branch(miss_branch, s->code_ptr, true);
++    }
+     //  Store #bits number of bits from reg_data into the guest address in reg_addr
+     //
+     //  Clobbers R0, R1, and R2 since we need extra scratch registers
+@@ -1150,10 +1311,19 @@ static inline void tcg_out_qemu_st(TCGContext *s, int bits, int reg_data, int re
+     //  Needed to make sure atomic instructions using this works correctly
+     //  ST-LD barrier because we only need the store to be visible to future loads
+     tcg_out_mb(s, TCG_MO_ST_LD);
++    if(done_branch) {
++        tcg_patch_branch(done_branch, s->code_ptr, false);
++    }
+ }
+ 
+ static inline void tcg_out_qemu_ld(TCGContext *s, int bits, bool sign_extend, int reg_data, int reg_addr, int mem_index)
+ {
++    uint8_t *done_branch = NULL;
++    int s_bits = bits == 8 ? 0 : bits == 16 ? 1 : bits == 32 ? 2 : 3;
++    uint8_t *miss_branch = tcg_out_tlb_fast_path(s, s_bits, true, sign_extend, reg_data, reg_addr, mem_index, &done_branch);
++    if(miss_branch) {
++        tcg_patch_branch(miss_branch, s->code_ptr, true);
++    }
+     //  Put the address in r0, and mem_index in r1
+     tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_R0, reg_addr);
+     tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_R1, mem_index);
+@@ -1181,6 +1351,9 @@ static inline void tcg_out_qemu_ld(TCGContext *s, int bits, bool sign_extend, in
+     } else {
+         tcg_out_mov(s, TCG_TYPE_I64, reg_data, TCG_REG_R0);
+     }
++    if(done_branch) {
++        tcg_patch_branch(done_branch, s->code_ptr, false);
++    }
+ }
+ 
+ //  Variable used to store the return address. Used in INDEX_op_exit_tb
