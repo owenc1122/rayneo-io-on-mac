@@ -1,0 +1,13 @@
+# Head-up wake: crown press (RUNNING), wait for the 15 s auto screen-off, look down, then raise the head.
+gpio0 Pulse 1 false 120
+emulation RunFor "1"
+gpio0 Pulse 1 false 1300
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-0-awake.pgm
+emulation RunFor "26"
+lcdc SaveFrame @OUT/shot-1-off.pgm
+headMotion Pose -30 0
+emulation RunFor "2"
+headMotion Pose 25 0
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-2-headup.pgm

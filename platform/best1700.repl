@@ -227,8 +227,9 @@ btcBleExchange: Memory.MappedMemory @ sysbus 0x6d070000
 // Crown key P0_1 (active low, pull-up); see .local/research/parallel/input.md.
 // Pull-ups: P0_1 crown key; I2C pins idle high (iomux tables at 0x20100e6b..: I2C1 = pins 30/31,
 // I2C3 = 26/27, I2C4 SCL = 3), which the BTH I2C bus-recovery check samples before transfers.
+// Bit 17 = IMU INT1 (BTH board_lsm6dso32_attach: GPIO_PIN2_1, falling edge), idle high.
 gpio0: GPIOPort.BES1700_GPIO @ sysbus 0x40081000
-    pullUps: 0xcc00000a
+    pullUps: 0xcc02000a
 
 // GPIO1 also carries I2C0 pins 46/47 (bits 14/15, used by the BTH I2C1 bus recovery check): pulled up.
 gpio1: GPIOPort.BES1700_GPIO @ sysbus 0x40089000
@@ -248,6 +249,7 @@ psc: Miscellaneous.BES1700_PSC @ sysbus 0x40085000
     gpio1: gpio1
     gpio2: gpio2
     IRQ -> nvic@2
+    BthIRQ -> bthNvic@2
 
 panelSPI: SPI.BES1700_PanelSPI @ sysbus 0x40009000
     panel: gpio1
@@ -318,9 +320,9 @@ bthDma0: DMA.BES1700_DMA @ sysbus 0x50170000
 bthDma1: DMA.BES1700_DMA @ sysbus 0x50130000
     IRQ -> bthNvic@29
 
-// Head-tracking IMU probed by the BTH ("lsm6dso32", WHO_AM_I 0x6C). Renode's LSM6DSO
-// model stands in for the LSM6DSO32; the I2C address is an assumption.
-bthImu: Sensors.LSM6DSO_IMU @ bthI2c1 0x6a
+// Head-tracking IMU probed by the BTH ("lsm6dso32", WHO_AM_I 0x6C), see BES1700_LSM6DSO32.cs.
+bthImu: Sensors.BES1700_LSM6DSO32 @ bthI2c1 0x6a
+    Interrupt1 -> gpio0@17
 
 // Host head pose -> IMU (not hardware; unused window). See BES1700_HeadMotion.cs.
 headMotion: Miscellaneous.BES1700_HeadMotion @ sysbus 0x7ff00000

@@ -9,7 +9,7 @@
 ## 快速使用
 
 ```sh
-# 一次性：Renode 放在 .local/renode/Renode.app；Python 资源分区工具（会从 PyPI 下载 littlefs-python）
+# 一次性：Renode（sh scripts/get-renode.sh，需 1.17.0+20261016 或更新）；Python 工具（从 PyPI 下载 littlefs-python、fonttools）
 sh scripts/setup-tools.sh
 
 # 命令行运行 60 秒模拟时间，日志与画面写到 .local/runs/demo/
@@ -92,8 +92,8 @@ sh scripts/emulate.sh /path/to/StrixOS-1.0.4.12 40 .local/runs/ble "$PWD/Tests/s
 
 - **手机连接**：BLE 链路层已能与虚拟手机连接，但虚拟手机还不会说 rnlink 协议（帧格式 `aa55` 已见，消息未解析），所以依赖手机 App 的功能仍停在「请将眼镜连接至手机 App」。尚未建模：BR/EDR（寻呼/寻呼扫描后的 ACL、LMP，因此 SPP/RFCOMM、iAP2、A2DP、HFP 都不可用）、链路加密与 SMP 配对（AES 引擎 0xb0–0xc4、CRYPT 中断）、第二套基带 IP（0x6d060000）的空口桥、每个连接事件只收发一个 PDU。iOS 上 rnlink 依赖 iAP2（BR/EDR + MFi 认证芯片签名），模拟器无法产生该签名，真 iPhone 的 iAP2 功能不可能在纯模拟下工作。
 - **音频**：HiFi4 DSP 不执行，只实现其接口（见「音频」一节）；降噪/波束和唤醒词「小雷」算法没有复现，离线时原固件本身也会关闭语音唤醒（`MuteState ... switch to offline`）。BTH 上的常开 VAD 需要 codec2 硬件模型，尚未建模。模拟速度约为实时的 1/8：Mac 应用里原固件放出的声音是断续的，录到的语音被原固件按模拟时间读取，会越来越滞后。
-- **其他传感器**：光感 W1160（I2C1 0x48，固件读到 250 lux）、磁力计 MMC5603NJ（BTH I2C1 0x30，ID 0x10）已被原固件识别；IMU 已激活，`headMotion`（Pose/Nod/Shake/Turn）可按模拟时间驱动它，但头部手势在原固件里的效果尚未验证。BTH I2C1 的 DMA 模式未建模（固件两次超时后自动改用 FIFO，开机多约 1 秒）。佩戴检测、Wi‑Fi 未建模。
-- **速度**：约为实时的 1/8，开机到桌面约 2 分钟。四个核改为串行执行（`SetGlobalSerialExecution`）后不再出现模型锁死锁，速度与并行相当。
+- **其他传感器**：光感 W1160（I2C1 0x48，固件读到 250 lux）、磁力计 MMC5603NJ（BTH I2C1 0x30，ID 0x10）已被原固件识别。IMU 换成自建 LSM6DSO32 模型（FIFO、INT1 低有效），中断经 PSC 的 BTH 组寄存器（使能 0x12c/0x1b4/0x1d8、状态 0x138/0x1b8/0x1dc，BTH NVIC 2）送达 BTH，BTH 按水位持续读 FIFO，颈部姿态监测拿到数据。`headMotion`（Pose/Nod/Shake/Turn，按出厂默认安装角 101°/−65°/−65° 反变换）可驱动它。原厂「抬头亮屏」默认关闭（手机 App 的 headup_switch），点头/摇头只在来电等场景由 AP 开启检测，这两项要等手机端协议才能完整验证。iO 没有佩戴传感器（`controlCapSensorAsync` 为空实现），状态机在按表冠后由 LIGHT_SLEEP 进入 RUNNING。BTH I2C1 的 DMA 模式未建模（固件两次超时后改用 FIFO）。Wi‑Fi 未建模。
+- **速度**：约为实时的 1/8，开机到桌面约 2 分钟。并行执行；`SERIAL=1` 可切到串行（Renode 1.17 串行模式可能卡在 WFI）。
 - `pixel_monospaced_latin_sub` 字体不是原厂文件（未识别出原字体）。
 
 ## 研究工具
