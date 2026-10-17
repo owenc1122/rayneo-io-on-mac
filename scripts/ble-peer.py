@@ -291,30 +291,36 @@ def main():
     c = Central(log)
     c.rn = rnlink.RnlinkPhone(c.say, c.rnlink_send, c)
     c.say('waiting for the emulator on port %d' % a.port)
-    conn, _ = srv.accept()
-    f = conn.makefile('rw', newline='\n')
-    c.say('emulator connected')
-    for line in f:
-        w = line.split()
-        if not w:
-            continue
-        if w[0] == 'ADV':
-            reply = c.on_adv(w[1], int(w[2]), w[3], w[4:])
-        elif w[0] == 'EVT':
-            if c.connected_cs is None:
-                reply = 'NONE'
+    # Re-accept across reconnects: a dropped model connection (or a stray probe) must not kill us.
+    while True:
+        conn, _ = srv.accept()
+        f = conn.makefile('rw', newline='\n')
+        c.__init__(log); c.rn = rnlink.RnlinkPhone(c.say, c.rnlink_send, c)   # fresh per model session
+        c.say('emulator connected')
+        for line in f:
+            w = line.split()
+            if not w:
+                continue
+            if w[0] == 'ADV':
+                reply = c.on_adv(w[1], int(w[2]), w[3], w[4:])
+            elif w[0] == 'EVT':
+                if c.connected_cs is None:
+                    reply = 'NONE'
+                else:
+                    llid, payload = c.next_pdu()
+                    reply = 'RX %02x %s' % (llid, payload.hex())
+            elif w[0] == 'TX':
+                for p in w[2:]:
+                    hdr, data = p.split(':')
+                    c.on_glasses_pdu(int(hdr, 16), bytes.fromhex(data))
+                reply = 'OK'
             else:
-                llid, payload = c.next_pdu()
-                reply = 'RX %02x %s' % (llid, payload.hex())
-        elif w[0] == 'TX':
-            for p in w[2:]:
-                hdr, data = p.split(':')
-                c.on_glasses_pdu(int(hdr, 16), bytes.fromhex(data))
-            reply = 'OK'
-        else:
-            reply = 'NONE'
-        f.write(reply + '\n')
-        f.flush()
+                reply = 'NONE'
+            try:
+                f.write(reply + '\n'); f.flush()
+            except (BrokenPipeError, OSError):
+                break
+        c.say('emulator disconnected, waiting again')
 
 
 if __name__ == '__main__':
