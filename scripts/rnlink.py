@@ -302,7 +302,17 @@ class RnlinkPhone:
         # DOMAIN answer (handleDomainMessage schema): "answer" is a NESTED object {text, isFinal};
         # the glasses read answer.text / answer.isFinal and render it via dispatchNlpTextAction.
         # sid + round tie it to the session.
-        sid = 'standin-sid-1'
+        self.assist_sid = 'standin-sid-1'
+        self.assist_text = answer
+        self.send_assist_answer()
+        # Re-send the answer on the next few connection events: on a fast emulator the first DOMAIN
+        # can race the Listening->Processing transition and be dropped before ChatDomain is ready.
+        self.assist_resend = 4
+
+    def send_assist_answer(self):
+        import json
+        sid, answer = self.assist_sid, self.assist_text
+        self.tx(0x0d, pb_msg(self.ASSIST_STATE, message=json.dumps({'rc': 3})))   # ensure Processing
         self.tx(0x0d, pb_msg(self.ASSIST_DOMAIN, message=json.dumps(
             {'domain': 'chat', 'intent': 'chat', 'sid': sid, 'round': 1,
              'answer': {'text': answer, 'isFinal': True}})))
@@ -331,6 +341,11 @@ class RnlinkPhone:
             self.tx(0x0f, pb_msg(typ or 6, message=payload_json))
         if 'current_weather_request' in text or 'current_weather' in text:
             self.push_weather()
+            # Re-send the assistant answer a few times (spaced by connection events) so it lands after
+            # the glasses have fully entered ProcessingState, even on a fast emulator.
+            if getattr(self, 'assist_resend', 0) > 0:
+                self.assist_resend -= 1
+                self.send_assist_answer()
             # Keep a notification banner continuously on screen: push a fresh notification (new UID,
             # so it is not de-duplicated) every few connection events. Event-driven, NOT wall-clock,
             # so a banner is always on screen when a frame is captured, regardless of emulator speed.
