@@ -3,7 +3,7 @@
 
     scripts/ble-peer.py [--port 23600] [--log peer.log]
 
-Start it before the emulator and set `btcRadio PeerPort <port>` (see tests/scenarios/ble-peer.resc).
+Start it before the emulator and set `btcRadio PeerPort <port>` (see Tests/scenarios/ble-peer.resc).
 The baseband model hands every BLE advertising/connection event to this process in lock step;
 this script plays the central: it answers the glasses' connectable advertising with a
 CONNECT_IND, then for each connection event supplies the central's PDU and receives the

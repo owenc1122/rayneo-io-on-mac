@@ -1,0 +1,7 @@
+# Bonded-phone reconnection with no phone in range (run with ~15 s boot):
+#   SCENARIO=Tests/scenarios/bt-reconnect.txt scripts/emulate.sh <fw> 15
+# Expect in boot.log: "RNLINK:adv start result: 0", then "[C1] CT:page end:link=1, status=4"
+# (page timeout from the controller) and "ios_spp_retry_timer_handler retrying iOS SPP connection".
+# Optional activity trace: append "btcRadio TraceEvents true" to an extra .resc.
+emulation RunFor "30"
+lcdc SaveFrame @OUT/shot-bt-reconnect.pgm

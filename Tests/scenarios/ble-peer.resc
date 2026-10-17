@@ -1,0 +1,4 @@
+# Extra .resc for scripts/emulate.sh: hand BLE air traffic to scripts/ble-peer.py (start it first).
+#   python3 scripts/ble-peer.py --port 23600 --log peer.log &
+#   scripts/emulate.sh <fw> 30 <out> "$PWD/Tests/scenarios/ble-peer.resc"
+btcRadio PeerPort 23600
