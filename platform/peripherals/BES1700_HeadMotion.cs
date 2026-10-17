@@ -1,4 +1,4 @@
-// Host-side head pose for the BTH IMU (Renode LSM6DSO_IMU standing in for the LSM6DSO32).
+// Host-side head pose for the BTH IMU (BES1700_LSM6DSO32).
 // Not a chip register block: it sits on an unused sysbus window so the monitor / Mac app can call it,
 // and drives the IMU's default acceleration (gravity direction from pitch/roll) and angular rate.
 // Gestures are played in virtual time so they keep real-world timing however fast the emulation runs.
@@ -17,7 +17,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 {
     public sealed class BES1700_HeadMotion : IDoubleWordPeripheral, IKnownSize
     {
-        public BES1700_HeadMotion(IMachine machine, LSM6DSO_IMU imu) { this.machine = machine; this.imu = imu; Apply(0, 0, 0, 0, 0); }
+        public BES1700_HeadMotion(IMachine machine, BES1700_LSM6DSO32 imu) { this.machine = machine; this.imu = imu; Apply(0, 0, 0, 0, 0); }
         public long Size => 0x100;
         public uint ReadDoubleWord(long offset) { return 0; }
         public void WriteDoubleWord(long offset, uint value) { }
@@ -56,15 +56,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         {
             double pr = p * Math.PI / 180, rr = r * Math.PI / 180;
             // Gravity seen by the sensor at rest is +1 g on the up axis; tilting moves it to X/Y.
-            imu.DefaultAccelerationX = (decimal)(-Math.Sin(pr));
-            imu.DefaultAccelerationY = (decimal)(Math.Sin(rr) * Math.Cos(pr));
-            imu.DefaultAccelerationZ = (decimal)(Math.Cos(rr) * Math.Cos(pr));
-            imu.DefaultAngularRateX = (decimal)rateX;
-            imu.DefaultAngularRateY = (decimal)rateY;
-            imu.DefaultAngularRateZ = (decimal)rateZ;
+            imu.AccelX = -Math.Sin(pr);
+            imu.AccelY = Math.Sin(rr) * Math.Cos(pr);
+            imu.AccelZ = Math.Cos(rr) * Math.Cos(pr);
+            imu.GyroX = rateX; imu.GyroY = rateY; imu.GyroZ = rateZ;
         }
         private readonly IMachine machine;
-        private readonly LSM6DSO_IMU imu;
+        private readonly BES1700_LSM6DSO32 imu;
         private double pitch, roll;
     }
 }
