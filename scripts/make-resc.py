@@ -83,7 +83,9 @@ lines += [
     # All cores on one emulation thread (SERIAL=0 to run them in parallel). With parallel CPU threads,
     # guest spinlocks shared by the AP/M55C1/BTH occasionally livelock inside tlib, and peripheral models
     # shared by several cores race. Needs Renode >= 1.17.0+20261016 (the 20260906 build stalled in WFI).
-] + ([] if __import__('os').environ.get('SERIAL') == '0' else ['emulation SetGlobalSerialExecution true']) + [
+] + ([] if __import__('os').environ.get('SERIAL') == '0' else ['emulation SetGlobalSerialExecution true']) + (
+    # QUANTUM=<seconds>: cores synchronise every quantum (Renode default 0.0001).
+    [f'emulation SetGlobalQuantum "{__import__("os").environ["QUANTUM"]}"'] if __import__('os').environ.get('QUANTUM') else []) + [
     'cpu PerformanceInMips 200',
     'btc PerformanceInMips 100',
     'bth PerformanceInMips 100',
@@ -96,9 +98,18 @@ lines += [
     # firmware-invisible privileged-RW/XN region 16 covering exactly the PPB.
     'bth PmsaV8Rnr 16', 'bth PmsaV8Rbar 0xe0000001', 'bth PmsaV8Rlar 0xe00fffe1', 'bth PmsaV8Rnr 0',
     'c1 PmsaV8Rnr 16', 'c1 PmsaV8Rbar 0xe0000001', 'c1 PmsaV8Rlar 0xe00fffe1', 'c1 PmsaV8Rnr 0',
+    # M55C1 idle: in PM state IDLE its hal_sleep_proc(light) returns at 0x103cb8 without sleeping when
+    # no sleep lock is held, so the idle loop spins at the core's full speed until the governor allows
+    # deep sleep (seconds after any activity). Send it down the firmware's own light-sleep path instead
+    # (0x103b5c: WFI with SLEEPDEEP clear, then the normal return). The PM state only changes in code
+    # that an interrupt runs, and every interrupt ends the WFI. IDLE_SPIN=1 keeps the spinning.
+] + ([] if __import__('os').environ.get('IDLE_SPIN') == '1' else [
+    'c1 AddHook 0x00103cb8 "self.PC = Antmicro.Renode.Peripherals.CPU.RegisterValue.Create(0x103b5d, 32)"',
+]) + [
     'cpu SP 0x202fffe0',
     'cpu PC 0x10190010',
-    # AP trace hooks; addresses are from the 1.0.4.12 symbol table.
+] + ([] if __import__('os').environ.get('HOOKS') == '0' else [
+    # AP trace hooks (HOOKS=0 leaves them out); addresses are from the 1.0.4.12 symbol table.
     'cpu AddHook 0x10b734 """' + out_hook + '"""',
     'cpu AddHook 0x105ca280 """' + syslog_hook + '"""',
     # BTH hal_trace_printf_internal(attr, fmt, va_list): flash 0x0c003550, copied (by -0x590) to and
@@ -111,7 +122,7 @@ lines += [
     'c1 AddHook 0x00102adc """' + c1_hook('i') + '"""',
     # M55C1 nx_vsyslog at 0x10d0a008 (veneer target from its trace path).
     'c1 AddHook 0x10d0a008 """' + c1_hook('v') + '"""',
-] + ([] if not __import__('os').environ.get('C1DBG') else [
+]) + ([] if not __import__('os').environ.get('C1DBG') else [
     'c1 AddHook 0x10cfed54 """\nbus=machine.SystemBus\nr0=self.GetRegister(0).RawValue\nprint(\'[C1DBG] rx_by_chan r0=0x%x cfg=0x%x lr=0x%x\' % (r0, bus.ReadDoubleWord(r0), self.GetRegister(14).RawValue))\n"""',
     'c1 AddHook 0x10cff780 """\nbus=machine.SystemBus\nr0=self.GetRegister(0).RawValue\nprint(\'[C1DBG] rx_irq cfg=0x%x name=0x%x inst=0x%x lr=0x%x\' % (r0, bus.ReadDoubleWord(r0), bus.ReadDoubleWord(r0+0x10), self.GetRegister(14).RawValue))\n"""',
 ]) + [
@@ -119,6 +130,9 @@ lines += [
 if extra:
     lines.append(f'include {at(extra)}')
 if seconds != '0':
+    # REALTIME=1: pace a command-line run to the host clock like the app does.
+    if __import__('os').environ.get('REALTIME') == '1':
+        lines.append('aonCmu RealTime true')
     lines.append(f'emulation RunFor "{seconds}"')
     # SCENARIO=<file>: monitor commands run after the boot period (input tests, frame captures).
     scenario = __import__('os').environ.get('SCENARIO')
@@ -127,5 +141,8 @@ if seconds != '0':
     lines += [
               'console_log `cpu PC`', 'console_log `cpu LR`', 'console_log `bth PC`', 'console_log `c1 PC`', 'console_log `btc PC`', 'quit']
 else:
+    # Mac app: keep virtual time from running ahead of the host (REALTIME=0 to run flat out).
+    if __import__('os').environ.get('REALTIME') != '0':
+        lines.append('aonCmu RealTime true')
     lines.append('start')
 print('\n'.join(lines))
