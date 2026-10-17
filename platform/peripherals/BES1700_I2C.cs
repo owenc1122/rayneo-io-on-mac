@@ -16,10 +16,13 @@ namespace Antmicro.Renode.Peripherals.I2C
     {
         public BES1700_I2C(IMachine machine) : base(machine) { IRQ = new GPIO(); Reset(); }
         public GPIO IRQ { get; }
+        // Monitor: `bthI2c2 TraceTransfers true` logs every command and register access.
+        public bool TraceTransfers { get; set; }
         public long Size => 0x100;
 
         public uint ReadDoubleWord(long offset)
         {
+            if(TraceTransfers && offset != 0x70 && offset != 0x78 && offset != 0x74) this.Log(LogLevel.Info, "rd 0x{0:X2}", offset);
             switch(offset) {
                 case 0x00: return con;
                 case 0x04: return tar;
@@ -63,6 +66,7 @@ namespace Antmicro.Renode.Peripherals.I2C
 
         public void WriteDoubleWord(long offset, uint value)
         {
+            if(TraceTransfers && offset != 0x10) this.Log(LogLevel.Info, "wr 0x{0:X2} = 0x{1:X}", offset, value);
             switch(offset) {
                 case 0x00: con = value; break;
                 case 0x04: tar = value & 0x3ff; break;
@@ -93,10 +97,12 @@ namespace Antmicro.Renode.Peripherals.I2C
         {
             if((enable & 1) == 0) { raw |= TxOver; Update(); return; }
             bool read = (value & 0x100) != 0, stop = (value & 0x200) != 0, restart = (value & 0x400) != 0;
+            if(TraceTransfers) this.Log(LogLevel.Info, "cmd tar=0x{0:X2} {1} {2}{3}{4}", tar & 0x7f, read ? "R" : "W 0x" + (value & 0xff).ToString("X2"), stop ? "STOP " : "", restart ? "RESTART " : "", (enable & 1) == 0 ? "(disabled)" : "");
             if(!inTransfer) Start();
             else if(restart || read != lastRead) { Flush(); if(restart) raw |= StartDet; }
             if(target == null) {
                 raw |= TxAbrt; abortSource |= 1;        // ABRT_7B_ADDR_NOACK
+                if(nacked.Add(tar & 0x7f)) this.Log(LogLevel.Info, "No target at 0x{0:X2} (address NACK)", tar & 0x7f);
                 EndTransfer(true); Update(); return;
             }
             if(read) {
@@ -143,6 +149,7 @@ namespace Antmicro.Renode.Peripherals.I2C
         private readonly Queue<byte> rx = new Queue<byte>();
         private readonly List<byte> pending = new List<byte>();
         private readonly Dictionary<long, uint> regs = new Dictionary<long, uint>();
+        private readonly HashSet<uint> nacked = new HashSet<uint>();
         private II2CPeripheral target;
         private bool inTransfer, lastRead;
         private uint con, tar, mask, rxTl, txTl, enable, raw, abortSource, sdaHold, dmaCr, dmaTdlr, dmaRdlr;
