@@ -1,16 +1,16 @@
-# Map the app list and open the live-subtitle (CC) app, capturing each step.
-emulation RunFor "30"
+# Open the live-subtitle (CC) app and verify the phone-pushed caption renders. The duration arg (30 s)
+# already covers boot + rnlink connect, so navigate right away and leave time for the caption stream.
 gpio0 Pulse 1 false 120
-emulation RunFor "3"
+emulation RunFor "2"
 lcdc SaveFrame @OUT/shot-a-wake.pgm
 gpio0 Pulse 1 false 120
-emulation RunFor "3"
+emulation RunFor "2"
 lcdc SaveFrame @OUT/shot-b-list.pgm
 i2c0.ots Rotate 400
-emulation RunFor "3"
+emulation RunFor "2"
 lcdc SaveFrame @OUT/shot-c-cc.pgm
 gpio0 Pulse 1 false 120
-emulation RunFor "5"
+emulation RunFor "6"
 lcdc SaveFrame @OUT/shot-d-open.pgm
-emulation RunFor "8"
+emulation RunFor "14"
 lcdc SaveFrame @OUT/shot-e.pgm
