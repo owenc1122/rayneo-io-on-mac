@@ -185,7 +185,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             if(next!=ulong.MaxValue) {
                 alarm.Enabled=false;
                 alarm.Value=0;
-                alarm.Limit=Math.Max(1UL,next-now);
+                alarm.Limit=next>now ? next-now : 1UL;   // ulong: never let a past deadline underflow
                 alarm.Enabled=true;
             }
         }
