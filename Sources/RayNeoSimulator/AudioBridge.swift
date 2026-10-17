@@ -19,6 +19,7 @@ final class AudioBridge {
     private var speakerHandle: FileHandle?
     private var speakerOffset: UInt64 = 0
     private let eventsURL: URL
+    private let playedURL: URL
     static let chunkBytes: UInt64 = 48_000 * 4 * 10
     private var poll: DispatchSourceTimer?
     private var micConverter: AVAudioConverter?
@@ -31,6 +32,8 @@ final class AudioBridge {
         micURL = runDirectory.appendingPathComponent("mic.raw")
         speakerURL = runDirectory.appendingPathComponent("speaker.raw")
         eventsURL = runDirectory.appendingPathComponent("speaker.events")
+        playedURL = runDirectory.appendingPathComponent("speaker.played")
+        FileManager.default.createFile(atPath: playedURL.path, contents: nil)
         FileManager.default.createFile(atPath: micURL.path, contents: nil)
     }
 
@@ -133,6 +136,12 @@ final class AudioBridge {
                 right[i] = Float(Int16(littleEndian: s[2 * i + 1])) / 32768
             }
         }
-        player.scheduleBuffer(buffer, completionHandler: nil)
+        let end = speakerOffset
+        player.scheduleBuffer(buffer) { [weak self] in
+            // evidence for tests: what reached the Mac output, as speaker.raw offsets
+            guard let self else { return }
+            let line = "\(end) played \(String(format: "%.3f", Date().timeIntervalSince1970))\n"
+            if let h = try? FileHandle(forWritingTo: self.playedURL) { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close() }
+        }
     }
 }

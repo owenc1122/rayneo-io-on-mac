@@ -17,6 +17,7 @@ import SwiftUI
     private var monitor: NWConnection?
     private let monitorPort: UInt16 = 23_456
     private var audio: AudioBridge?
+    private var helper: Process?
 
     private static let firmwareKey = "firmwareDirectory"
     private static let fontsKey = "fontsDirectory"
@@ -36,7 +37,8 @@ import SwiftUI
         task.executableURL = URL(fileURLWithPath: "/bin/sh")
         task.arguments = [root.appendingPathComponent("scripts/make-kws-templates.sh").path, kwsDirectory.path]
         task.currentDirectoryURL = root
-        task.terminationHandler = { [weak self] _ in Task { @MainActor in if thenBoot { self?.boot() } } }
+        task.terminationHandler = { [weak self] _ in Task { @MainActor in self?.helper = nil; if thenBoot { self?.boot() } } }
+        helper = task   // keep the Process alive, otherwise its termination handler never runs
         try? task.run()
     }
 

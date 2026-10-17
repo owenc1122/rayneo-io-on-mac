@@ -516,7 +516,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             streams.Remove(index);
             if(wakeStream == index) wakeStream = -1;
             s.Encoder?.Dispose(); s.Decoder?.Dispose();
-            if(s.Reader && s.PlayStart >= 0) SpeakerEvent("end " + s.Name);
+            if(s.Reader && s.PlayStart >= 0 && s.SpeakerBytes > s.SegmentStart) SpeakerEvent("end " + s.Name);
             this.Log(LogLevel.Info, "hifi4: stream remove 0x{0:X2} {1} after {2} frames", index, s.Name, s.Frames);
         }
 
@@ -683,12 +683,15 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 if(s.Fifo == 0) return;
                 // The DSP plays in real time: take a frame only while less than 200 ms of decoded audio is
                 // queued ahead of the (virtual) playback clock, so the AP is paced as by the real speaker DMA.
-                if(s.PlayStart < 0) { s.PlayStart = (long)now; SpeakerEvent("start " + s.Name); }
+                // a pause of 300 ms ends the current utterance (the player keeps utterances whole)
+                if(s.PlayStart >= 0 && s.SpeakerBytes > s.SegmentStart && now > s.LastAudio + 300) { SpeakerEvent("end " + s.Name); s.PlayStart = -1; }
                 for(int i = 0; i < 16; i++) {
-                    long played = (long)(now - (ulong)s.PlayStart) * 48 * 4;   // bytes of 48 kHz stereo s16 due by now
-                    if(s.SpeakerBytes > played + 48 * 4 * 200) break;
+                    long played = s.PlayStart < 0 ? 0 : (long)(now - (ulong)s.PlayStart) * 48 * 4;   // bytes due by now
+                    if(s.PlayStart >= 0 && s.SpeakerBytes - s.PlayedBase > played + 48 * 4 * 200) break;
                     var data = FifoRead(s);
                     if(data == null) break;
+                    if(s.PlayStart < 0) { s.PlayStart = (long)now; s.SegmentStart = s.SpeakerBytes; s.PlayedBase = s.SpeakerBytes; SpeakerEvent("start " + s.Name); }
+                    s.LastAudio = now;
                     s.Frames++; framesIn++;
                     Speaker(s, data);
                     if(s.Frames == 1 || s.Frames == 10 || (s.Frames % 100) == 0) this.Log(LogLevel.Info, "hifi4: AP -> {0} frame {1} ({2} bytes {3}), {4} bytes 48 kHz stereo to the speaker", s.Name, s.Frames, data.Length, s.Codec, s.SpeakerBytes);
@@ -760,7 +763,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     // The emulator runs slower than real time: keep the backlog short by dropping silence
                     // (speech is always delivered whole); a long run of speech is cut only past 20 s.
                     long backlog = (length - srcPos) / 2;
-                    if(backlog > 20 * MicRate) { srcPos = length - MicRate * 2; backlog = MicRate; }
+                    // continuous sound cannot be delivered whole 8x slower: keep at most 4 s of latency
+                    if(backlog > 4 * MicRate) { long jump = (backlog - MicRate) * 2; srcPos += jump; skipped += jump / 2; backlog = MicRate; }
                     // Only long pauses (> 0.4 s) are shortened, to 0.2 s: speech keeps its natural gaps,
                     // which the stock VAD needs.
                     if(backlog > MicRate / 2) {
@@ -769,7 +773,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                             micStream.Position = scan; micStream.Read(probe, 0, 320);
                             double e = 0; for(int i = 0; i < 160; i++) { double v = BitConverter.ToInt16(probe, 2 * i); e += v * v; }
                             double rms = Math.Sqrt(e / 160);
-                            noiseFloor = rms < noiseFloor ? 0.9 * noiseFloor + 0.1 * rms : 0.999 * noiseFloor + 0.001 * rms;
+                            noiseFloor = rms < noiseFloor ? 0.9 * noiseFloor + 0.1 * rms : 0.99 * noiseFloor + 0.01 * rms;   // ~1 s up
                             if(rms > Math.Max(400, noiseFloor * 4)) break;
                             quiet++; scan += 320;
                         }
@@ -912,7 +916,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             public uint Rate = 16000, Channels = 1, Bits = 16, FrameBytes = 1920, FrameMs = 60; public string Codec = "pcm";
             public ulong NextTick; public uint Frames; public long NextSample; public uint Bitrate, Application, FrameSamples, Head; public long SpeakerBytes; public byte[] Cookie;
             public HostOpusEncoder Encoder;
-            public HostDecoder Decoder; public bool DecoderFailed; public long PlayStart = -1;
+            public HostDecoder Decoder; public bool DecoderFailed; public long PlayStart = -1, SegmentStart, PlayedBase; public ulong LastAudio;
         }
 
         // Opus via macOS AudioToolbox (kAudioFormatOpus), one packet per FIFO frame (haveHead=0: raw packets).
