@@ -7,6 +7,7 @@
 using System;
 using System.Collections.Generic;
 using Antmicro.Renode.Core;
+using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.I2C;
 using Antmicro.Renode.Peripherals.Timers;
 using Antmicro.Renode.Time;
@@ -24,6 +25,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
         }
         public GPIO Interrupt1 { get; }
         public GPIO Interrupt2 { get; }
+        public bool TraceStats { get; set; }
         // Motion in the sensor frame: acceleration in g, angular rate in dps.
         public double AccelX { get; set; }
         public double AccelY { get; set; }
@@ -96,6 +98,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
                 case 0x7e: {
                     if(fifo.Count == 0) return 0;
                     var w = fifo.Dequeue(); fifoReads++;
+                    if(TraceStats && (fifoReads == 1 || fifoReads % 200 == 0)) this.Log(LogLevel.Info, "FIFO read: " + Stats());
                     UpdateInterrupts();
                     return w[6];
                 }
@@ -133,6 +136,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
         {
             ticks += 25;   // TIMESTAMP counts 25 us
             samples++;
+            if(TraceStats && samples % 500 == 0) this.Log(Antmicro.Renode.Logging.LogLevel.Info, Stats());
             int mode = regs[0x0a] & 7;
             if(mode != 0) {
                 // BDR_XL = FIFO_CTRL3[3:0], BDR_GY = [7:4]; batch whichever is enabled.
@@ -168,7 +172,7 @@ namespace Antmicro.Renode.Peripherals.Sensors
         }
         private void Drive(bool asserted, bool activeLow)
         {
-            if(asserted && !lastAsserted) edges++;
+            if(asserted && !lastAsserted) { edges++; if(TraceStats && edges <= 5) this.Log(LogLevel.Info, "INT1 asserted: " + Stats()); }
             lastAsserted = asserted;
             Interrupt1.Set(asserted ^ activeLow);
         }

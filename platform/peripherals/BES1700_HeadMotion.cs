@@ -52,14 +52,44 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             }
             machine.ScheduleAction(TimeInterval.FromSeconds(at), _ => Apply(pitch, roll, 0, 0, 0));
         }
+        // Sensor mounting: the BTH neck monitor rotates IMU samples by Euler angles (roll, pitch, yaw) =
+        // imu_params, default [101, -65, -65] deg when factory data is blank (AP log "Using default imu_params").
+        // Head-frame vectors are mapped back into the sensor frame with the transpose of that rotation.
+        public double MountRoll { get; set; } = 101;
+        public double MountPitch { get; set; } = -65;
+        public double MountYaw { get; set; } = -65;
+        public int MountOrder { get; set; } = 0;     // 0: R = Rz*Ry*Rx, 1: R = Rx*Ry*Rz
         private void Apply(double p, double r, double rateX, double rateY, double rateZ)
         {
             double pr = p * Math.PI / 180, rr = r * Math.PI / 180;
-            // Gravity seen by the sensor at rest is +1 g on the up axis; tilting moves it to X/Y.
-            imu.AccelX = -Math.Sin(pr);
-            imu.AccelY = Math.Sin(rr) * Math.Cos(pr);
-            imu.AccelZ = Math.Cos(rr) * Math.Cos(pr);
-            imu.GyroX = rateX; imu.GyroY = rateY; imu.GyroZ = rateZ;
+            // Gravity reaction in the head frame at rest is +1 g up; tilting moves it to X/Y.
+            var g = new[] { -Math.Sin(pr), Math.Sin(rr) * Math.Cos(pr), Math.Cos(rr) * Math.Cos(pr) };
+            var w = new[] { rateX, rateY, rateZ };
+            var R = Mount();
+            var gs = MulT(R, g); var ws = MulT(R, w);
+            imu.AccelX = gs[0]; imu.AccelY = gs[1]; imu.AccelZ = gs[2];
+            imu.GyroX = ws[0]; imu.GyroY = ws[1]; imu.GyroZ = ws[2];
+        }
+        private double[,] Mount()
+        {
+            double a = MountRoll * Math.PI / 180, b = MountPitch * Math.PI / 180, c = MountYaw * Math.PI / 180;
+            var rx = new double[,] { { 1, 0, 0 }, { 0, Math.Cos(a), -Math.Sin(a) }, { 0, Math.Sin(a), Math.Cos(a) } };
+            var ry = new double[,] { { Math.Cos(b), 0, Math.Sin(b) }, { 0, 1, 0 }, { -Math.Sin(b), 0, Math.Cos(b) } };
+            var rz = new double[,] { { Math.Cos(c), -Math.Sin(c), 0 }, { Math.Sin(c), Math.Cos(c), 0 }, { 0, 0, 1 } };
+            return MountOrder == 0 ? Mul(Mul(rz, ry), rx) : Mul(Mul(rx, ry), rz);
+        }
+        private static double[,] Mul(double[,] x, double[,] y)
+        {
+            var m = new double[3, 3];
+            for(int i = 0; i < 3; i++) for(int j = 0; j < 3; j++) for(int k = 0; k < 3; k++) m[i, j] += x[i, k] * y[k, j];
+            return m;
+        }
+        // Sensor = R^T * head (R maps sensor to head).
+        private static double[] MulT(double[,] m, double[] v)
+        {
+            var o = new double[3];
+            for(int i = 0; i < 3; i++) for(int k = 0; k < 3; k++) o[i] += m[k, i] * v[k];
+            return o;
         }
         private readonly IMachine machine;
         private readonly BES1700_LSM6DSO32 imu;

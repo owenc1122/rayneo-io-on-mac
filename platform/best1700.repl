@@ -249,6 +249,7 @@ psc: Miscellaneous.BES1700_PSC @ sysbus 0x40085000
     gpio1: gpio1
     gpio2: gpio2
     IRQ -> nvic@2
+    BthIRQ -> bthNvic@2
 
 panelSPI: SPI.BES1700_PanelSPI @ sysbus 0x40009000
     panel: gpio1
