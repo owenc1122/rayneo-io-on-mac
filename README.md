@@ -16,7 +16,7 @@ sh scripts/setup-tools.sh
 FONTS=/path/to/ttf sh scripts/emulate.sh /path/to/StrixOS-1.0.4.12 60 .local/runs/demo
 
 # Mac 应用
-sh scripts/build-app.sh                 # BUNDLE_RENODE=1 时把 Renode 一起打包进 .app
+sh scripts/build-app.sh                 # BUNDLE_RENODE=1 时把 Renode 一起打包进 .app（有 build-renode.sh 的源码构建时打包它）
 sh scripts/run-app.sh                   # 等同于 Finder 双击
 ```
 
