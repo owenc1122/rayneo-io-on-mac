@@ -144,7 +144,9 @@ class RnlinkPhone:
     """
 
     def __init__(self, say, send, central):
+        import os
         self.say, self.send, self.central = say, send, central
+        self.notif_demo = bool(os.environ.get('NOTIF_DEMO'))
         self.started = False
         self.dev_info_done = False
         self.authed = False
@@ -275,6 +277,14 @@ class RnlinkPhone:
             self.tx(0x0f, pb_msg(typ or 6, message=payload_json))
         if 'current_weather_request' in text or 'current_weather' in text:
             self.push_weather()
+            # Re-push a notification periodically (new UID each time) so a banner is on-screen when
+            # a frame is captured; the glasses auto-dismiss each after ~5 s.
+            if getattr(self, 'notif_demo', False):
+                self.notif_tick = getattr(self, 'notif_tick', 0) + 1
+                if self.notif_tick % 20 == 0:
+                    self.notif_uid = getattr(self, 'notif_uid', 1) + 1
+                    self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',
+                                           app='WhatsApp', uid=str(self.notif_uid), ntype=1)
             # Piggyback the caption stream on this frequent tick so it stays on-screen.
             if getattr(self, 'caption_lines', None):
                 # Advance to the next distinct line every ~8 weather ticks (a few seconds apart);
@@ -312,5 +322,18 @@ class RnlinkPhone:
                 self.authed = True
                 self.say('rnlink AUTH OK, glasses reply %s' % data.hex())
                 self.push_weather()           # proactively fill the home-screen weather
+                if getattr(self, 'notif_demo', False):
+                    # Notification channel = business 0x15; "type" 1 = add/display (2 remove, 3 update).
+                    self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',
+                                           app='WhatsApp', appid='com.whatsapp', uid='1', ntype=1)
         else:
             self.say('rnlink cmd 0x%02x data %s (unhandled)' % (cmd, data.hex()))
+
+    def push_notification(self, business, title, content, app='WhatsApp', appid='com.whatsapp',
+                          subtitle='', uid='1', category=0, ntype=1):
+        import json, time as _t
+        msg = {'notificationUID': uid, 'appId': appid, 'appName': app, 'title': title,
+               'subtitle': subtitle, 'content': content, 'category': category, 'type': ntype,
+               'timestamp': int(_t.time() * 1000), 'phoneNumber': ''}
+        self.say('rnlink -> NOTIFICATION business=0x%02x %r / %r' % (business, title, content))
+        self.tx(business, pb_msg(2, message=json.dumps(msg)))
