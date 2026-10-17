@@ -206,14 +206,29 @@ class RnlinkPhone:
         except Exception:
             text = msg.hex()
         self.say('rnlink %s type=%s msg=%s' % (BUSINESS.get(business, hex(business)), typ, text))
+        if business != 0x0f:
+            return
         # Answer the glasses' time request with the current wall-clock + timezone.
-        if business == 0x0f and 'sync_time' in text:
+        if 'sync_time' in text:
             import json, time as _t
             off = -_t.timezone if not _t.daylight else -_t.altzone
             payload_json = json.dumps({'cmd': 'sync_time', 'payload': {
                 'utc': int(_t.time()), 'offset': off, 'timezone': 'Asia/Shanghai'}})
             self.say('rnlink -> sync_time reply %s' % payload_json)
             self.tx(0x0f, pb_msg(typ or 6, message=payload_json))
+        if 'current_weather_request' in text or 'current_weather' in text:
+            self.push_weather()
+
+    # ---- phone-driven features ----
+    def push_weather(self, temp=23, location='Shanghai', icon=1):
+        import json
+        # Dashboard command (launcher receiveMessage type 0x12 -> DashboardProtocolController::decode,
+        # which cJSON-parses {"cmd","payload":{value,mode,data}}; data is a nested JSON string with
+        # the weather fields temp/location/icon). cmd current_weather_update -> processCurrentWeatherUpdate.
+        data = json.dumps({'temp': temp, 'location': location, 'icon': icon})
+        msg = json.dumps({'cmd': 'current_weather_update', 'payload': {'value': 0, 'mode': 0, 'data': data}})
+        self.say('rnlink -> weather %s' % msg)
+        self.tx(0x0f, pb_msg(0x12, message=msg))
 
     def on_rnlink_cmd(self, cmd, data):
         if cmd == 0x11:                        # glasses dev-info reply
@@ -226,5 +241,6 @@ class RnlinkPhone:
         elif cmd == 0x18:                      # glasses auth reply (success)
             self.authed = True
             self.say('rnlink AUTH OK, glasses reply %s' % data.hex())
+            self.push_weather()               # proactively fill the home-screen weather
         else:
             self.say('rnlink cmd 0x%02x data %s (unhandled)' % (cmd, data.hex()))

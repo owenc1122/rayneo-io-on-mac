@@ -1,0 +1,3 @@
+# Virtual phone + weather push. Expect home status bar to show a real temperature (e.g. 23C) not --C.
+emulation RunFor "45"
+lcdc SaveFrame @OUT/shot-weather.pgm
