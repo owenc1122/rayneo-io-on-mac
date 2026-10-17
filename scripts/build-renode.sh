@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds Renode 1.17.0+20261016 (commit d0c70ee3f, the build get-renode.sh downloads) from source with the
-# tlib patches in renode-patches/, for macOS arm64. Result: .local/renode-build/renode, which emulate.sh,
-# check-models.sh and the app (from a development checkout) use in place of .local/renode/Renode.app.
+# patches in renode-patches/, for macOS arm64. Result: a self-contained .local/renode-build/Renode.app (plus a
+# .local/renode-build/renode launcher), which emulate.sh, check-models.sh, the app from a development checkout and
+# BUNDLE_RENODE=1 sh scripts/build-app.sh use in place of the downloaded .local/renode/Renode.app.
 #
 # The patches only make tlib and the time/hook plumbing faster (see each patch); guest-visible behaviour is
 # unchanged.
@@ -64,15 +65,20 @@ for p in "$root"/renode-patches/*.patch; do
     esac
 done
 
-(cd "$src" && ./build.sh --no-gui --skip-fetch)
-
-mkdir -p .local/renode-build
-cat > .local/renode-build/renode <<EOF
+# -t: self-contained portable package (same form as the downloaded Renode.app, no .NET install needed)
+(cd "$src" && ./build.sh --no-gui --skip-fetch -t)
+dmg=$(ls -t "$src"/output/packages/renode-*.osx-arm64-portable-headless.dmg | head -1)
+out=.local/renode-build
+rm -rf "$out" && mkdir -p "$out"
+mnt=$(mktemp -d)
+hdiutil attach -nobrowse -quiet -mountpoint "$mnt" "$dmg"
+cp -R "$mnt"/Renode.app "$out/"
+hdiutil detach -quiet "$mnt"
+cat > "$out/renode" <<EOF
 #!/bin/sh
 # Renode built from source by scripts/build-renode.sh (commit $renode_commit + renode-patches/).
-export DOTNET_ROOT="$dotnet_root" PATH="$dotnet_root:\$PATH"
-exec "$src/renode" "\$@"
+exec "\$(dirname "\$0")/Renode.app/Contents/MacOS/renode" "\$@"
 EOF
-chmod +x .local/renode-build/renode
-.local/renode-build/renode --version > /dev/null || { echo "The build does not start" >&2; exit 1; }
-.local/renode-build/renode --version | tail -1
+chmod +x "$out/renode"
+"$out/renode" --version > /dev/null || { echo "The build does not start" >&2; exit 1; }
+"$out/renode" --version | tail -2

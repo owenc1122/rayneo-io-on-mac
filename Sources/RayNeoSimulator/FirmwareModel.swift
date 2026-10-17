@@ -58,7 +58,7 @@ import SwiftUI
         if let resources = Bundle.main.resourceURL { candidates.append(resources.appendingPathComponent("renode/Renode.app/Contents/MacOS/renode")) }
         candidates.append(dataDirectory.appendingPathComponent("renode/Renode.app/Contents/MacOS/renode"))
         if let root = assetRoot {
-            candidates.append(root.appendingPathComponent(".local/renode-build/renode"))   // scripts/build-renode.sh
+            candidates.append(root.appendingPathComponent(".local/renode-build/Renode.app/Contents/MacOS/renode"))   // scripts/build-renode.sh
             candidates.append(root.appendingPathComponent(".local/renode/Renode.app/Contents/MacOS/renode"))
         }
         candidates.append(URL(fileURLWithPath: "/Applications/Renode.app/Contents/MacOS/renode"))
