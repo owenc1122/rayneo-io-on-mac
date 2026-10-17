@@ -7,6 +7,10 @@ using Antmicro.Renode.Peripherals;
 using Antmicro.Renode.Peripherals.Bus;
 namespace Antmicro.Renode.Peripherals.DMA
 {
+    // A device FIFO register the DMA drains in one call instead of one bus access per element
+    // (the NAND data register during page reads: ~35 M bus reads per emulated second otherwise).
+    public interface IBES1700_DmaFifo { void ReadFifo(long offset, byte[] data, int count, int width); }
+
     public sealed class BES1700_DMA : IDoubleWordPeripheral, IKnownSize, IGPIOReceiver
     {
         public BES1700_DMA(IMachine machine) { this.machine=machine; IRQ=new GPIO(); }
@@ -71,7 +75,7 @@ namespace Antmicro.Renode.Peripherals.DMA
                 uint requested=(Get(b+12)&0xfff)*(1u<<(int)((Get(b+12)>>18)&7));
                 if(requested>available)return;
             }
-            var visited=new HashSet<uint>();
+            HashSet<uint> visited=null;
             while(true) {
                 uint src=Get(b),dst=Get(b+4),next=Get(b+8),ctrl=Get(b+12);
                 int sw=1<<(int)((ctrl>>18)&7),dw=1<<(int)((ctrl>>21)&7);
@@ -79,22 +83,60 @@ namespace Antmicro.Renode.Peripherals.DMA
                 if(sw>4 || dw>4 || sw!=dw) {Fail(channel,"unsupported transfer width");break;}
                 uint count=ctrl&0xfff;
                 if(transfers++<12) this.Log(LogLevel.Info,"DMA ch={0} src={1:X} dst={2:X} count={3} flow={4}",channel,src,dst,count,flow);
-                for(uint i=0;i<count;i++) {
-                    if(sw==1) bus.WriteByte(dst,bus.ReadByte(src));
-                    else if(sw==2) bus.WriteWord(dst,bus.ReadWord(src));
-                    else bus.WriteDoubleWord(dst,bus.ReadDoubleWord(src));
-                    if((ctrl&(1u<<26))!=0) src+=(uint)sw;
-                    if((ctrl&(1u<<27))!=0) dst+=(uint)dw;
-                }
+                Copy(bus,ref src,ref dst,count,sw,(ctrl&(1u<<26))!=0,(ctrl&(1u<<27))!=0);
                 regs[b]=src;regs[b+4]=dst;regs[b+12]=ctrl&~0xfffu;
                 if((ctrl&0x80000000u)!=0) completed|=1u<<channel;
                 if(next==0) break;
                 uint address=next&~3u;
+                if(visited==null) visited=new HashSet<uint>();
                 if(visited.Count>=1024 || !visited.Add(address)) {Fail(channel,"circular descriptor");break;}
                 for(int i=0;i<4;i++) regs[b+i*4]=bus.ReadDoubleWord(address+(uint)i*4);
             }
             regs[b+16]=Get(b+16)&~1u;
             Update();
+        }
+        // Element-wise copy, except that memory is read and written in one block: every bus write into
+        // RAM from a model invalidates translated code on every CPU (tlib call, signal-mask syscalls), so
+        // a word-by-word NAND->PSRAM page copy cost far more than the firmware's whole boot work.
+        private void Copy(IBusController bus,ref uint src,ref uint dst,uint count,int width,bool srcInc,bool dstInc) {
+            int bytes=(int)count*width;
+            bool srcMem=srcInc && IsMemory(bus,src), dstMem=dstInc && IsMemory(bus,dst);
+            if(dstMem || srcMem) {
+                byte[] data;
+                if(srcMem) data=bus.ReadBytes(src,bytes);
+                else if(!srcInc && bus.WhatIsAt(src) is var reg && reg?.Peripheral is IBES1700_DmaFifo fifo) {
+                    data=new byte[bytes];
+                    fifo.ReadFifo((long)(src-reg.RegistrationPoint.Range.StartAddress),data,(int)count,width);
+                }
+                else {
+                    data=new byte[bytes];
+                    for(int i=0;i<(int)count;i++) {
+                        uint a=srcInc?src+(uint)(i*width):src;
+                        uint v=width==1?bus.ReadByte(a):width==2?bus.ReadWord(a):bus.ReadDoubleWord(a);
+                        for(int k=0;k<width;k++) data[i*width+k]=(byte)(v>>(8*k));
+                    }
+                }
+                if(dstMem) bus.WriteBytes(data,dst);
+                else for(int i=0;i<(int)count;i++) {
+                    uint a=dstInc?dst+(uint)(i*width):dst, v=0;
+                    for(int k=0;k<width;k++) v|=(uint)data[i*width+k]<<(8*k);
+                    if(width==1) bus.WriteByte(a,(byte)v); else if(width==2) bus.WriteWord(a,(ushort)v); else bus.WriteDoubleWord(a,v);
+                }
+            } else {
+                for(uint i=0;i<count;i++) {
+                    if(width==1) bus.WriteByte(dst,bus.ReadByte(src));
+                    else if(width==2) bus.WriteWord(dst,bus.ReadWord(src));
+                    else bus.WriteDoubleWord(dst,bus.ReadDoubleWord(src));
+                    if(srcInc) src+=(uint)width;
+                    if(dstInc) dst+=(uint)width;
+                }
+                return;
+            }
+            if(srcInc) src+=(uint)bytes;
+            if(dstInc) dst+=(uint)bytes;
+        }
+        private static bool IsMemory(IBusController bus,uint address) {
+            return bus.WhatIsAt(address)?.Peripheral is Antmicro.Renode.Peripherals.Memory.MappedMemory;
         }
         private void Fail(int channel,string reason) {errors|=1u<<channel;this.Log(LogLevel.Warning,"DMA channel {0}: {1}",channel,reason);}
         private uint Get(long o) {return regs.TryGetValue(o,out var v)?v:0;}

@@ -48,6 +48,22 @@ if %s:
     for _l in fw_format(bus, self.GetRegister(1).RawValue, %s, self).split('\\n'):
         if _l.strip(): print('[C1] ' + _l.rstrip())
 ''' % (cond, ap)
+def delay_hook(unit):
+    return '''
+from Antmicro.Renode.Time import TimeInterval
+from Antmicro.Renode.Peripherals.CPU import RegisterValue
+from System import Action
+n = int(self.GetRegister(0).RawValue)
+us = n if '%s' == 'us' else n // 1000
+if us > 0:
+    cpu = self
+    ret = cpu.GetRegister(14).RawValue
+    def wake(t):
+        cpu.PC = RegisterValue.Create(ret, 32)
+        cpu.IsHalted = False
+    cpu.IsHalted = True
+    machine.ScheduleAction(TimeInterval.FromMicroseconds(us), Action[TimeInterval](wake))
+''' % unit
 out_hook = '''
 buf = self.GetRegister(0).RawValue
 n = int(self.GetRegister(1).RawValue)
@@ -105,6 +121,13 @@ lines += [
     # that an interrupt runs, and every interrupt ends the WFI. IDLE_SPIN=1 keeps the spinning.
 ] + ([] if __import__('os').environ.get('IDLE_SPIN') == '1' else [
     'c1 AddHook 0x00103cb8 "self.PC = Antmicro.Renode.Peripherals.CPU.RegisterValue.Create(0x103b5d, 32)"',
+    # AP busy-wait delays on the 6 MHz counter (sysCmu +0x288): hal_sys_timer_delay_us(us) and
+    # hal_sys_timer_delay_ns(ns) are 4-instruction loops reading the counter ~50 times per emulated
+    # microsecond, each read a model call. The hook halts the core for exactly the requested time and
+    # resumes it at the caller (interrupts arriving meanwhile are taken afterwards). DELAY_SPIN=1 keeps them.
+]) + ([] if __import__('os').environ.get('DELAY_SPIN') == '1' else [
+    'cpu AddHook 0x0011492c """' + delay_hook('us') + '"""',
+    'cpu AddHook 0x0012f450 """' + delay_hook('ns') + '"""',
 ]) + [
     'cpu SP 0x202fffe0',
     'cpu PC 0x10190010',
