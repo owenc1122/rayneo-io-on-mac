@@ -46,6 +46,7 @@ phone notification 30 bt-notification.txt NOTIF_DEMO=1
 phone assistant 30 bt-assistant.txt
 phone btrecord 25 bt-record.txt RECORD_DEMO=1
 phone settings 30 bt-settings.txt SETTINGS_DEMO=1
+phone todo 30 bt-todo.txt TODO_DEMO=1
 for p in $jobs_pids; do wait "$p"; done
 kill $peer_pids 2>/dev/null
 fi
@@ -54,7 +55,7 @@ fail=0
 check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fail=1; fi; }
 n() { c=$(grep -ac "$2" "$out/$1/boot.log" 2>/dev/null); echo "${c:-0}"; }
 shots() { ls "$out/$1" 2>/dev/null | grep -c '^shot-'; }
-for r in crown rotate bt record speaker wake wakeneg weather subtitle notification assistant btrecord settings; do
+for r in crown rotate bt record speaker wake wakeneg weather subtitle notification assistant btrecord settings todo; do
     check "$r: no firmware assert" "[ \$(n $r 'dump_assert_info: Assert') -eq 0 ]"
 done
 check "crown: 10 screenshots" "[ \$(shots crown) -eq 10 ]"
@@ -65,7 +66,7 @@ check "record: correlation ${corr:-none} >= 0.85" "python3 -c 'import sys; sys.e
 check "speaker: tone captured" "python3 scripts/check-audio.py '$out/speaker' 2>&1 | grep -q 'peak 32768'"
 check "wake: 小雷小雷 confirmed" "[ \$(n wake 'wake word confirmed') -gt 0 ]"
 check "wake-negative: no wake" "[ \$(n wakeneg 'wake word confirmed') -eq 0 ]"
-for r in weather subtitle notification assistant btrecord settings; do
+for r in weather subtitle notification assistant btrecord settings todo; do
     check "$r: rnlink auth" "[ \$(n $r 'auth success') -gt 0 ]"
 done
 # On-screen checks: a firmware log line that only appears once the phone-driven content is rendered.
@@ -76,5 +77,6 @@ check "assistant: answer card rendered (ChatDomain)" "[ \$(n assistant 'ChatDoma
 check "btrecord: phone-configured double-click starts recording" "[ \$(n btrecord 'startRecordingSync') -gt 0 ]"
 check "settings: phone config applied (head-up threshold)" "[ \$(n settings 'apply head up threshold') -gt 0 ]"
 check "settings: glasses reports config back (both ways)" "[ \$(n settings 'sending wakeup_config report') -gt 0 ]"
+check "todo: item pushed and inserted on the card" "[ \$(n todo 'result=insert') -gt 0 ]"
 echo "results in $out"
 exit $fail
