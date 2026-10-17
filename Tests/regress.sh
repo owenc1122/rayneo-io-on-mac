@@ -14,8 +14,23 @@ export FONTS=${FONTS:-$root/.local/fonts-factory}
 # Free local TCP ports, so several regressions (other checkouts, other sessions) can run at once.
 free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
 
+# Cap the number of emulators running at once so one regression never oversubscribes the host's
+# cores (an overloaded box starves the gpio/screenshot timing and the heaviest scenarios get killed).
+# MAXJOBS<=0 disables the cap. Each emulator is one core-bound Renode; ~6 fits a 15-core Mac comfortably.
+MAXJOBS=${MAXJOBS:-6}
+throttle() {  # block until fewer than MAXJOBS emulator jobs are still running
+    [ "$MAXJOBS" -gt 0 ] || return 0
+    while :; do
+        alive=0
+        for p in ${jobs_pids:-}; do kill -0 "$p" 2>/dev/null && alive=$((alive + 1)); done
+        [ "$alive" -lt "$MAXJOBS" ] && return 0
+        sleep 1
+    done
+}
+
 run() {  # run <name> <seconds> <scenario> [env...]
     name=$1 secs=$2 scen=$3; shift 3
+    throttle
     (env "$@" SCENARIO="$root/Tests/scenarios/$scen" RENODE_BATCH_PORT=$(free_port) \
         sh scripts/emulate.sh "$fw" "$secs" "$out/$name" "${EXTRA:-}" > /dev/null 2>&1) &
     jobs_pids="${jobs_pids:-} $!"
