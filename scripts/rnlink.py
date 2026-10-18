@@ -444,12 +444,14 @@ class RnlinkPhone:
             if getattr(self, 'assist_resend', 0) > 0:
                 self.assist_resend -= 1
                 self.send_assist_answer()
-            # Keep a notification banner continuously on screen: push a fresh notification (new UID,
-            # so it is not de-duplicated) every few connection events. Event-driven, NOT wall-clock,
-            # so a banner is always on screen when a frame is captured, regardless of emulator speed.
+            # A few more notifications (new UIDs, so they are not de-duplicated), spaced like a real
+            # phone's. Event-driven, NOT wall-clock, so a banner is on screen when a frame is captured
+            # regardless of emulator speed. Capped: an endless flood (dozens in 30 s, which no phone
+            # sends) overflows the stock firmware's analytics bulk upload (RnLinkMsgProcessor "pack
+            # size mismatch", then a heap assert in rayneo_analyticslog).
             if getattr(self, 'notif_demo', False):
                 self.notif_tick = getattr(self, 'notif_tick', 0) + 1
-                if self.notif_tick % 3 == 0:
+                if self.notif_tick % 6 == 0 and getattr(self, 'notif_uid', 1) < 6:
                     self.notif_uid = getattr(self, 'notif_uid', 1) + 1
                     self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',
                                            app='WhatsApp', uid=str(self.notif_uid), ntype=1)
