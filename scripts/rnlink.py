@@ -227,6 +227,7 @@ class RnlinkPhone:
         import os
         self.say, self.send, self.central = say, send, central
         self.notif_demo = bool(os.environ.get('NOTIF_DEMO'))
+        self.call_demo = bool(os.environ.get('CALL_DEMO'))
         self.record_demo = bool(os.environ.get('RECORD_DEMO'))
         self.settings_demo = bool(os.environ.get('SETTINGS_DEMO'))
         self.todo_demo = bool(os.environ.get('TODO_DEMO'))
@@ -462,6 +463,12 @@ class RnlinkPhone:
                 self.notif_uid = getattr(self, 'notif_uid', 1) + 1
                 self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',
                                        app='WhatsApp', uid=str(self.notif_uid), ntype=1)
+        # Incoming-call notification: raise it once, then re-assert it a few times (like a phone
+        # keeps the call ringing) so the call UI is on screen when a frame is captured.
+        if getattr(self, 'call_demo', False):
+            self.call_tick = getattr(self, 'call_tick', 0) + 1
+            if self.call_tick == 2 or (self.call_tick > 2 and self.call_tick % 6 == 0):
+                self.push_call('+15550123', name='Virtual Phone')
         # Caption stream: keeps a line on screen.
         if getattr(self, 'caption_lines', None):
             # Advance to the next distinct line every 8 ticks (a few seconds apart);
@@ -750,10 +757,18 @@ class RnlinkPhone:
             self.say('rnlink cmd 0x%02x data %s (unhandled)' % (cmd, data.hex()))
 
     def push_notification(self, business, title, content, app='WhatsApp', appid='com.whatsapp',
-                          subtitle='', uid='1', category=0, ntype=1):
+                          subtitle='', uid='1', category=0, ntype=1, phone_number=''):
         import json, time as _t
         msg = {'notificationUID': uid, 'appId': appid, 'appName': app, 'title': title,
                'subtitle': subtitle, 'content': content, 'category': category, 'type': ntype,
-               'timestamp': int(_t.time() * 1000), 'phoneNumber': ''}
+               'timestamp': int(_t.time() * 1000), 'phoneNumber': phone_number}
         self.say('rnlink -> NOTIFICATION business=0x%02x %r / %r' % (business, title, content))
         self.tx(business, pb_msg(2, message=json.dumps(msg)))
+
+    def push_call(self, number='+15550123', name='', uid='call1', ntype=1):
+        # Incoming-call notification: ANCS category 1 (IncomingCall) drives the glasses'
+        # CallNotification UI (NotificationService::onCallNotificationReceived). type 1 = show,
+        # 2 = remove (call ended/answered elsewhere).
+        self.push_notification(0x15, name or number, 'Incoming call', app='Phone',
+                               appid='com.android.phone', uid=uid, category=1, ntype=ntype,
+                               phone_number=number)

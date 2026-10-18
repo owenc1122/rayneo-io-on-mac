@@ -78,6 +78,7 @@ phone todo 30 bt-todo.txt TODO_DEMO=1
 phone prompter 48 bt-prompter.txt PROMPT_DEMO=1
 phone ota 60 bt-ota.txt OTA_DIR="$fw" OTA_FILES=smf.json
 phone_classic weatherbt 135 bt-classic-weather.txt
+phone_classic hfpcall 135 bt-classic-hfp.txt HFP_CALL=1 CALL_DEMO=1
 for p in $jobs_pids; do wait "$p"; done
 kill $peer_pids 2>/dev/null
 fi
@@ -112,6 +113,13 @@ check "weatherbt: rnlink authenticated over classic BT" "[ \$(n weatherbt 'auth 
 check "weatherbt: bonded, dashboard active (bond_state 2)" "[ \$(n weatherbt 'bond_state: 2') -gt 0 ]"
 check "weatherbt: weather data applied on dashboard over classic BT" "[ \$(n weatherbt 'json_len=136') -gt 0 ]"
 check "weatherbt: weather frame captured while connected" "[ \$(shots weatherbt) -ge 1 ]"
+# Classic BT HFP incoming call: the phone AG opens the SLC to the glasses' HF over a second RFCOMM
+# DLC and raises a call; the call also arrives as an rnlink notification that renders the call UI.
+check "hfpcall: no firmware assert" "[ \$(n hfpcall 'dump_assert_info: Assert') -eq 0 ]"
+check "hfpcall: HFP service-level connection + RING over classic BT" "grep -q 'HFP <- AT+BRSF' '$out/hfpcall/peer.log' && grep -q 'HFP -> RING' '$out/hfpcall/peer.log'"
+check "hfpcall: glasses recognise the incoming call (+15550123)" "[ \$(n hfpcall 'number:+15550123') -gt 0 ]"
+check "hfpcall: incoming-call UI shown on screen" "[ \$(n hfpcall 'showNotification - UID: call1') -gt 0 ]"
+check "hfpcall: call frame captured while connected" "[ \$(shots hfpcall) -ge 1 ]"
 check "subtitle: caption rendered (TranslationTextUpdate)" "[ \$(n subtitle 'onAction - TranslationTextUpdate') -gt 0 ]"
 check "notification: banner shown on screen" "[ \$(n notification 'Notification layer shown') -gt 0 ]"
 check "assistant: answer card rendered (ChatDomain)" "[ \$(n assistant 'ChatDomain::onMessageReceived') -gt 0 ]"

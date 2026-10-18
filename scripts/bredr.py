@@ -95,6 +95,80 @@ PHONE_FEATURES = bytes.fromhex('bffecffedbff7b87')         # page 0 (3-slot/5-sl
 PHONE_FEATURES_EXT = {1: bytes.fromhex('0f00000000000000'),  # SSP host, LE host, simultaneous LE/BR, SC host
                       2: bytes.fromhex('0003000000000000')}  # ping, secure connections (controller)
 
+# RFCOMM server channels the phone (AG/target) advertises over SDP; rnlink SPP is channel 26.
+HFP_AG_CHANNEL = 13
+
+
+# ---- SDP data elements and a tiny SDP server (Core spec Vol 3 Part B 3.3, 4.x) -------------------
+def de_uint(v, size):                                       # unsigned int element (type 1)
+    return bytes([(1 << 3) | {1: 0, 2: 1, 4: 2, 8: 3}[size]]) + int(v).to_bytes(size, 'big')
+
+
+def de_uuid16(v):                                           # 16-bit UUID element (type 3)
+    return bytes([(3 << 3) | 1]) + int(v).to_bytes(2, 'big')
+
+
+def de_str(s):                                              # text string element (type 4, 8-bit len)
+    b = s.encode()
+    return bytes([(4 << 3) | 5, len(b)]) + b
+
+
+def de_seq(items):                                          # data-element sequence (type 6, 8-bit len)
+    body = b''.join(items)
+    return bytes([(6 << 3) | 5, len(body)]) + body
+
+
+def sdp_parse(data, i=0):
+    """Read one SDP data element at offset i -> (type, value_bytes, next_index)."""
+    b = data[i]
+    typ, sz = b >> 3, b & 7
+    i += 1
+    if sz < 5:
+        ln = (1, 2, 4, 8, 16)[sz]
+    elif sz == 5:
+        ln = data[i]; i += 1
+    elif sz == 6:
+        ln = struct.unpack_from('>H', data, i)[0]; i += 2
+    else:
+        ln = struct.unpack_from('>I', data, i)[0]; i += 4
+    return typ, data[i:i + ln], i + ln
+
+
+def sdp_uuids(seqval):                                      # 16-bit UUIDs inside a sequence element
+    out, i = [], 0
+    while i < len(seqval):
+        typ, val, i = sdp_parse(seqval, i)
+        if typ == 3 and len(val) == 2:
+            out.append(int.from_bytes(val, 'big'))
+    return out
+
+
+def sdp_attr_ranges(seqval):                                # requested attribute id ranges
+    rs, i = [], 0
+    while i < len(seqval):
+        typ, val, i = sdp_parse(seqval, i)
+        if typ == 1 and len(val) == 2:
+            a = int.from_bytes(val, 'big'); rs.append((a, a))
+        elif typ == 1 and len(val) == 4:
+            v = int.from_bytes(val, 'big'); rs.append((v >> 16, v & 0xffff))
+    return rs or [(0, 0xffff)]
+
+
+def hfp_ag_record(channel, features=0x0023):
+    """HFP Audio Gateway service record (attr id -> element). features: SDP supported-features
+    bitmap (bit0 three-way, bit1 EC/NR, bit5 wide-band speech)."""
+    return [
+        (0x0000, de_uint(0x00010001, 4)),                                   # ServiceRecordHandle
+        (0x0001, de_seq([de_uuid16(0x111F), de_uuid16(0x1203)])),           # HF-AG + GenericAudio
+        (0x0004, de_seq([de_seq([de_uuid16(0x0100)]),                       # L2CAP
+                         de_seq([de_uuid16(0x0003), de_uint(channel, 1)])])),  # RFCOMM + channel
+        (0x0005, de_seq([de_uuid16(0x1002)])),                              # PublicBrowseRoot
+        (0x0009, de_seq([de_seq([de_uuid16(0x111E), de_uint(0x0108, 2)])])),  # Handsfree v1.8
+        (0x0100, de_str('Voice gateway')),                                  # ServiceName
+        (0x0301, de_uint(0x01, 1)),                                         # Network: can reject a call
+        (0x0311, de_uint(features, 2)),                                     # SupportedFeatures
+    ]
+
 
 def lmp_pdu(name, payload=b'', tid=0):
     if name in LMP_EXT:
@@ -142,6 +216,15 @@ class ClassicPhone:
         self.on_spp_open = None         # callback(phone) when the rnlink SPP channel is up
         self.on_spp_data = None         # callback(bytes) for data from the glasses on SPP
         self.on_tick = None             # periodic phone-side work while connected
+        self.served = {0x0001: self.on_sdp_server}   # PSMs the phone answers (glasses-initiated)
+        self._out_cid = 0x0040          # monotonic CID allocator for outgoing (phone-initiated) channels
+        self._in_cid = 0x0080           # local CID allocator for incoming (glasses-initiated) channels
+        self.dlcs = {}                  # RFCOMM DLCI -> per-DLC state (shared mux, several channels)
+        self.rfcomm_mux_up = False      # RFCOMM control channel (DLCI 0) established
+        self.pending_dlc = None         # DLCI waiting for the mux to come up
+        self.spp_dlci = None            # rnlink SPP DLC (channel 26)
+        self.hfp = None                 # HFP Audio Gateway, bound once its DLC (glasses HF channel) opens
+        self.on_hf_channel = None       # callback(channel) once the glasses' HF RFCOMM channel is known
 
     # ---- air interface -------------------------------------------------------------------------
     def on_activity(self, w):
@@ -175,6 +258,13 @@ class ClassicPhone:
                 self.connected_events += 1
                 if self.on_tick and self.connected_events % 16 == 0:
                     self.on_tick()
+                if self.hfp and self.hfp.slc and self.connected_events % 16 == 0:
+                    if not getattr(self, 'hfp_call_made', False):
+                        self.hfp_call_made = True
+                        self.say('HFP SLC up -> raising incoming call +15550123')
+                        self.hfp.incoming_call('+15550123')
+                    elif self.hfp.ind.get('callsetup'):         # keep ringing until answered/screenshot
+                        self.hfp.ring()
                 if self.txq:
                     t, llid, payload = self.txq.pop(0)
                     return 'RX %x %x %x %s' % (t, self.lt_addr, llid, payload.hex())
@@ -424,7 +514,7 @@ class ClassicPhone:
         return self.sig_id
 
     def connect_psm(self, psm, handler, on_open):
-        scid = 0x40 + len(self.channels)
+        scid = self._out_cid; self._out_cid += 1   # monotonic: never reuse a CID still (or recently) live
         self.channels[scid] = dict(psm=psm, dcid=None, handler=handler, on_open=on_open,
                                    conf_out=False, conf_in=False, open=False)
         self.say('L2CAP -> connect PSM 0x%04x (scid 0x%04x)' % (psm, scid))
@@ -480,9 +570,19 @@ class ClassicPhone:
             elif code == 0x08:                                  # echo request
                 self.send_l2cap(1, struct.pack('<BBH', 0x09, ident, len(d)) + d)
             elif code == 0x02:                                  # connection request from the glasses
-                psm, scid = struct.unpack_from('<HH', d)
-                self.say('L2CAP connection req from glasses PSM 0x%04x' % psm)
-                self.send_l2cap(1, struct.pack('<BBHHHHH', 0x03, ident, 8, 0, scid, 0x0002, 0))
+                psm, rcid = struct.unpack_from('<HH', d)
+                srv = self.served.get(psm)
+                self.say('L2CAP connection req from glasses PSM 0x%04x (scid 0x%04x)%s'
+                         % (psm, rcid, '' if srv else ' - refused'))
+                if srv:
+                    mycid = self._in_cid; self._in_cid += 1
+                    self.channels[mycid] = dict(psm=psm, dcid=rcid, open=False, conf_in=False,
+                        conf_out=False, on_open=(lambda s: None),
+                        handler=(lambda pdu, s=mycid, fn=srv: fn(s, pdu)))
+                    self.send_l2cap(1, struct.pack('<BBHHHHH', 0x03, ident, 8, mycid, rcid, 0, 0))
+                    self.signal(0x04, struct.pack('<HH', rcid, 0) + bytes([0x01, 2]) + struct.pack('<H', 1021))
+                else:
+                    self.send_l2cap(1, struct.pack('<BBHHHHH', 0x03, ident, 8, 0, rcid, 0x0002, 0))
             else:
                 self.say('L2CAP signal code 0x%02x %s' % (code, d.hex()))
 
@@ -499,30 +599,91 @@ class ClassicPhone:
     # ---- profile bring-up after the link is set up --------------------------------------------
     def start_profiles(self):
         self.signal(0x0a, struct.pack('<H', 2))                 # extended features
-        self.sdp_cid = self.connect_psm(0x0001, self.on_sdp, self.sdp_query)
+        self.sdp_find_channel(self.RNLINK_UUID, self._rnlink_sdp_found, 'rnlink SPP')
 
-    # SDP client (Vol 3 Part B): ServiceSearchAttributeRequest for the rnlink SPP service.
+    # SDP client (Vol 3 Part B): ServiceSearchAttributeRequest to find a service's RFCOMM channel.
     RNLINK_UUID = bytes.fromhex('99999999999999999999999999999999')
 
-    def sdp_query(self, scid):
-        pattern = bytes([0x35, 17, 0x1c]) + self.RNLINK_UUID
+    def sdp_find_channel(self, uuid, on_found, name):
+        cid = self.connect_psm(0x0001, None, None)
+        ch = self.channels[cid]
+        ch['sdp_uuid'], ch['sdp_found'], ch['sdp_name'] = uuid, on_found, name
+        ch['handler'] = lambda pdu, s=cid: self.on_sdp(s, pdu)
+        ch['on_open'] = lambda scid=cid: self._sdp_query(scid)
+        return cid
+
+    def _sdp_query(self, scid):
+        ch = self.channels[scid]
+        uuid = ch['sdp_uuid']
+        pattern = (bytes([0x35, 3, 0x19]) + uuid) if len(uuid) == 2 else (bytes([0x35, 17, 0x1c]) + uuid)
         attrs = bytes([0x35, 5, 0x0a, 0x00, 0x00, 0xff, 0xff])
-        req = struct.pack('>HH', 1, len(pattern) + 2 + len(attrs) + 1)
         body = pattern + struct.pack('>H', 0x0400) + attrs + b'\0'
-        self.say('SDP -> ServiceSearchAttributeRequest (rnlink SPP UUID)')
+        self.say('SDP -> SearchAttrReq (%s)' % ch['sdp_name'])
         self.send_chan(scid, bytes([0x06]) + struct.pack('>HH', 1, len(body)) + body)
 
-    def on_sdp(self, pdu):
-        self.say('SDP <- %s' % pdu.hex())
-        if pdu and pdu[0] == 0x07:
-            # Find the RFCOMM channel: protocol descriptor UUID 0x0003 followed by uint8 channel.
-            i = pdu.find(bytes([0x19, 0x00, 0x03, 0x08]))
-            if i >= 0:
-                self.rfcomm_channel = pdu[i + 4]
-                self.say('SDP: rnlink SPP on RFCOMM channel %d' % self.rfcomm_channel)
-                self.signal(0x06, struct.pack('<HH', self.channels[self.sdp_cid]['dcid'], self.sdp_cid))
-                self.channels.pop(self.sdp_cid, None)
-                self.rfcomm_cid = self.connect_psm(0x0003, self.on_rfcomm, self.rfcomm_open)
+    def on_sdp(self, scid, pdu):
+        if not pdu or pdu[0] != 0x07:
+            return
+        ch = self.channels.get(scid, {})
+        # RFCOMM channel = protocol descriptor UUID 0x0003 followed by a uint8 channel.
+        i = pdu.find(bytes([0x19, 0x00, 0x03, 0x08]))
+        channel = pdu[i + 4] if i >= 0 else None
+        self.say('SDP <- %s: RFCOMM channel %s' % (ch.get('sdp_name', '?'), channel))
+        if ch.get('dcid') is not None:                          # tear down this SDP L2CAP channel
+            self.signal(0x06, struct.pack('<HH', ch['dcid'], scid))
+        self.channels.pop(scid, None)
+        if channel is not None and ch.get('sdp_found'):
+            ch['sdp_found'](channel)
+
+    def _rnlink_sdp_found(self, channel):
+        self.rfcomm_channel = channel
+        self.say('SDP: rnlink SPP on RFCOMM channel %d' % channel)
+        self.rfcomm_cid = self.connect_psm(0x0003, self.on_rfcomm, self._spp_start)
+
+    # ---- HFP Audio Gateway (phone): on an incoming call the AG opens the SLC to the glasses' HF ----
+    def start_hfp(self):
+        self.sdp_find_channel(bytes([0x11, 0x1e]), self._hfp_sdp_found, 'HFP HF (0x111E)')
+
+    def _hfp_sdp_found(self, channel):
+        from btprofiles import hfp
+        self.hfp = hfp.HfpAudioGateway(send=lambda b: self.dlc_write(self.hfp_dlci, b), say=self.say)
+        self.say('HFP: glasses HF on RFCOMM channel %d; opening AG SLC' % channel)
+        self.hfp_dlci = self.rfcomm_open_dlc(channel, self.hfp.on_data, self._hfp_opened, 'HFP')
+
+    def _hfp_opened(self, dlci):
+        # DLC up; the glasses' HF now drives the SLC AT handshake and the AG answers. The incoming
+        # call is raised from on_activity once hfp.slc is set.
+        self.say('HFP AG RFCOMM DLC up (DLCI %d); waiting for HF service-level connection' % dlci)
+
+    # ---- SDP server: the glasses (HF/sink) query the phone for its HFP AG / A2DP / AVRCP services --
+    def on_sdp_server(self, scid, pdu):
+        if not pdu or pdu[0] not in (0x02, 0x04, 0x06):
+            return
+        pid, tid, plen = pdu[0], struct.unpack_from('>H', pdu, 1)[0], struct.unpack_from('>H', pdu, 3)[0]
+        params = pdu[5:5 + plen]
+        if pid == 0x06:                                         # ServiceSearchAttributeRequest
+            _, pat, j = sdp_parse(params, 0)
+            j += 2                                              # skip MaximumAttributeByteCount
+            _, attrlist, j = sdp_parse(params, j)
+            uuids, ranges = sdp_uuids(pat), sdp_attr_ranges(attrlist)
+            self.say('SDP-server <- SearchAttrReq uuids=%s' % ['0x%04x' % u for u in uuids])
+            records = []
+            if {0x111F, 0x111E, 0x1203} & set(uuids):           # HFP AG asked for
+                records.append(hfp_ag_record(HFP_AG_CHANNEL))
+            lists = []
+            for rec in records:
+                items = [de_uint(aid, 2) + val for aid, val in rec
+                         if any(lo <= aid <= hi for lo, hi in ranges)]
+                lists.append(de_seq(items))
+            attrlists = de_seq(lists)
+            body = struct.pack('>H', len(attrlists)) + attrlists + b'\x00'
+            self.send_chan(scid, bytes([0x07]) + struct.pack('>HH', tid, len(body)) + body)
+            if records:
+                self.say('SDP-server -> HFP AG record (RFCOMM channel %d)' % HFP_AG_CHANNEL)
+        else:                                                   # 0x02/0x04: minimal empty answer
+            rid = 0x03 if pid == 0x02 else 0x05
+            body = (struct.pack('>HH', 0, 0) + b'\x00') if pid == 0x02 else (struct.pack('>H', 1) + de_seq([]) + b'\x00')
+            self.send_chan(scid, bytes([rid]) + struct.pack('>HH', tid, len(body)) + body)
 
     # ---- RFCOMM (TS 07.10 subset + Bluetooth credit-based flow control), the phone initiates ----
     @staticmethod
@@ -547,13 +708,47 @@ class ClassicPhone:
     def rfcomm_send(self, frame):
         self.send_chan(self.rfcomm_cid, frame)
 
-    def rfcomm_open(self, scid):
-        self.say('RFCOMM -> SABM DLCI 0')
-        self.rfcomm_send(self.rfcomm_frame(0, 0x3f))                # SABM, P=1
-
     def mux(self, mtype, data, cr=1):
         # Multiplexer control command on DLCI 0: type byte, length byte, values.
         return self.rfcomm_frame(0, 0xef, bytes([(mtype << 2) | (cr << 1) | 1, (len(data) << 1) | 1]) + data)
+
+    # A DLC is phone-initiated on the glasses' server `channel`; DLCI = channel<<1 (direction bit 0 =
+    # the device that set up the RFCOMM session). All DLCs share the one mux on self.rfcomm_cid.
+    def rfcomm_open_dlc(self, channel, on_data, on_open=None, name='DLC'):
+        dlci = channel << 1
+        self.dlcs[dlci] = dict(channel=channel, on_data=on_data, on_open=on_open, name=name,
+                               tx_credits=0, out=b'', rx_used=0, up=False)
+        if not self.rfcomm_mux_up:
+            self.pending_dlc = dlci
+            self.say('RFCOMM -> SABM DLCI 0')
+            self.rfcomm_send(self.rfcomm_frame(0, 0x3f))            # SABM, P=1
+        else:
+            self._rfcomm_pn(dlci)
+        return dlci
+
+    def _rfcomm_pn(self, dlci):
+        d = self.dlcs[dlci]
+        # PN: DLCI, CL=0xF (credit flow), priority 7, T1 0, N1 (max frame) 1000, NA 0, credits 7
+        pn = bytes([dlci, 0xf0, 7, 0]) + struct.pack('<H', 1000) + bytes([0, 7])
+        self.say('RFCOMM -> PN DLCI %d (%s channel %d)' % (dlci, d['name'], d['channel']))
+        self.rfcomm_send(self.mux(0x20, pn))
+
+    def dlc_write(self, dlci, raw):
+        d = self.dlcs.get(dlci)
+        if d is None:
+            return
+        d['out'] += raw
+        self._dlc_flush(dlci)
+
+    def _dlc_flush(self, dlci):
+        d = self.dlcs[dlci]
+        while d['out'] and d['tx_credits'] > 0:
+            chunk, d['out'] = d['out'][:900], d['out'][900:]
+            d['tx_credits'] -= 1
+            give = None
+            if d['rx_used'] >= 20:
+                give, d['rx_used'] = d['rx_used'], 0
+            self.rfcomm_send(self.rfcomm_frame(dlci, 0xef, chunk, credits=give))
 
     def on_rfcomm(self, pdu):
         addr, ctrl = pdu[0], pdu[1] & 0xef
@@ -572,12 +767,11 @@ class ClassicPhone:
         if ctrl == 0x63:                                            # UA
             self.say('RFCOMM <- UA DLCI %d' % dlci)
             if dlci == 0:
-                self.dlci = self.rfcomm_channel << 1
-                # PN: DLCI, CL=0xF (credit flow), priority 7, T1 0, N1 (max frame) 1000, NA 0, credits 7
-                pn = bytes([self.dlci, 0xf0, 7, 0]) + struct.pack('<H', 1000) + bytes([0, 7])
-                self.say('RFCOMM -> PN DLCI %d' % self.dlci)
-                self.rfcomm_send(self.mux(0x20, pn))
-            elif dlci == self.dlci:
+                self.rfcomm_mux_up = True
+                if self.pending_dlc is not None:
+                    self._rfcomm_pn(self.pending_dlc)
+                    self.pending_dlc = None
+            elif dlci in self.dlcs:                                 # our SABM for this DLC accepted
                 self.say('RFCOMM -> MSC DLCI %d' % dlci)
                 self.rfcomm_send(self.mux(0x38, bytes([(dlci << 2) | 3, 0x8d])))
         elif ctrl == 0x0f:                                          # DM
@@ -589,54 +783,63 @@ class ClassicPhone:
             self.rfcomm_send(self.rfcomm_frame(dlci, 0x73, cr=1))
         elif ctrl == 0xef and dlci == 0:
             self.on_mux(data)
-        elif ctrl == 0xef:
-            self.tx_credits = getattr(self, 'tx_credits', 0) + credits
+        elif ctrl == 0xef and dlci in self.dlcs:
+            d = self.dlcs[dlci]
+            d['tx_credits'] += credits
             if data:
-                self.rx_credits_used = getattr(self, 'rx_credits_used', 0) + 1
-                self.on_spp(data)
-            self.spp_flush()
+                d['rx_used'] += 1
+                if d['on_data']:
+                    d['on_data'](data)
+            if d['rx_used'] >= 20 and not d['out']:
+                self.rfcomm_send(self.rfcomm_frame(dlci, 0xef, b'', credits=d['rx_used']))
+                d['rx_used'] = 0
+            self._dlc_flush(dlci)
 
     def on_mux(self, data):
         mtype, cr = data[0] >> 2, (data[0] >> 1) & 1
         vals = data[2:2 + (data[1] >> 1)]
-        if mtype == 0x20 and not cr:                                # PN response
-            self.tx_credits = vals[7]
+        if mtype == 0x20 and not cr:                                # PN response (vals[0] = DLCI)
+            rdlci = vals[0]
+            d = self.dlcs.get(rdlci)
+            if d:
+                d['tx_credits'] = vals[7]
             self.say('RFCOMM <- PN rsp: frame %d credits %d' % (struct.unpack_from('<H', vals, 4)[0], vals[7]))
-            self.say('RFCOMM -> SABM DLCI %d (SPP channel %d)' % (self.dlci, self.rfcomm_channel))
-            self.rfcomm_send(self.rfcomm_frame(self.dlci, 0x3f))
+            self.say('RFCOMM -> SABM DLCI %d' % rdlci)
+            self.rfcomm_send(self.rfcomm_frame(rdlci, 0x3f))
         elif mtype == 0x38 and cr:                                  # MSC command from the glasses
             self.rfcomm_send(self.mux(0x38, vals, cr=0))
-            if not getattr(self, 'spp_up', False):
-                self.spp_up = True
-                self.say('SPP (RFCOMM channel %d) open: starting rnlink over classic BT' % self.rfcomm_channel)
-                # Give the glasses plenty of credits, then run the phone-side rnlink over this channel.
-                self.rfcomm_send(self.rfcomm_frame(self.dlci, 0xef, b'', credits=60))
-                if self.on_spp_open:
-                    self.on_spp_open(self)
+            mdlci = vals[0] >> 2
+            d = self.dlcs.get(mdlci)
+            if d and not d['up']:
+                d['up'] = True
+                # Give the glasses plenty of credits, then hand the open DLC to its owner.
+                self.rfcomm_send(self.rfcomm_frame(mdlci, 0xef, b'', credits=60))
+                if d['on_open']:
+                    d['on_open'](mdlci)
         elif mtype == 0x38 and not cr:
             pass                                                    # MSC response
         elif cr:
             self.say('RFCOMM mux cmd 0x%02x %s (answered)' % (mtype, vals.hex()))
             self.rfcomm_send(self.mux(mtype, vals, cr=0))
 
-    def spp_write(self, raw):
-        self.spp_out = getattr(self, 'spp_out', b'') + raw
-        self.spp_flush()
+    # ---- rnlink SPP DLC (channel 26): keeps the external on_spp_open / on_spp_data / spp_write API --
+    def _spp_start(self, scid):
+        self.spp_dlci = self.rfcomm_open_dlc(self.rfcomm_channel, self._spp_recv, self._spp_opened, 'SPP')
 
-    def spp_flush(self):
-        while getattr(self, 'spp_out', b'') and getattr(self, 'tx_credits', 0) > 0:
-            chunk, self.spp_out = self.spp_out[:900], self.spp_out[900:]
-            self.tx_credits -= 1
-            give = None
-            if getattr(self, 'rx_credits_used', 0) >= 20:
-                give, self.rx_credits_used = self.rx_credits_used, 0
-            self.rfcomm_send(self.rfcomm_frame(self.dlci, 0xef, chunk, credits=give))
+    def _spp_opened(self, dlci):
+        self.spp_up = True
+        self.say('SPP (RFCOMM channel %d) open: starting rnlink over classic BT' % self.dlcs[dlci]['channel'])
+        if self.on_spp_open:
+            self.on_spp_open(self)
+        if os.environ.get('HFP_CALL'):                          # bring up the HFP AG for the call demo
+            self.start_hfp()
 
-    def on_spp(self, data):
+    def _spp_recv(self, data):
         if self.on_spp_data:
             self.on_spp_data(data)
-        if getattr(self, 'rx_credits_used', 0) >= 20 and not getattr(self, 'spp_out', b''):
-            self.rfcomm_send(self.rfcomm_frame(self.dlci, 0xef, b'', credits=self.rx_credits_used))
-            self.rx_credits_used = 0
+
+    def spp_write(self, raw):
+        if self.spp_dlci is not None:
+            self.dlc_write(self.spp_dlci, raw)
 
 
