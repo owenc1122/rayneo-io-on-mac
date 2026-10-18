@@ -1,0 +1,9 @@
+# Observe the firmware's classic RX path after the controller injects RxAct on a peer page.
+# Hook only the page/FHS functions (asserts are called too often to hook - they flood the sim).
+btc AddHook 0x60420874 "print('[AP:out] F874 pscan_cbk r2=%d' % self.GetRegister(2).RawValue)"
+btc AddHook 0x604201f2 "print('[AP:out] F201f2 SET86=1')"
+btc AddHook 0x60420afc "print('[AP:out] Fafc STATE')"
+btc AddHook 0x6041e850 "print('[AP:out] Fe850 FHS_PARSE')"
+btc AddHook 0x60403190 "print('[AP:out] F403190 LC_MSG')"
+btc AddHook 0x60420028 "print('[AP:out] F28 CONNECT_MSG')"
+emulation RunFor "16"

@@ -48,6 +48,8 @@ class Central:
         self.rn = None                  # RnlinkPhone, attached by main()
         self.log_raw = False            # dump raw notify chunks (debug)
         self.classic_log_n = 0          # classic-BT (BR/EDR) air bridge: cap logging
+        self.pscan_n = 0                # page-scan windows seen
+        self.classic_paged = False      # offered a page yet
         self.glasses_addr = b''
 
     def say(self, *a):
@@ -370,13 +372,20 @@ def main():
                     c.on_glasses_pdu(int(hdr, 16), bytes.fromhex(data))
                 reply = 'OK'
             elif w[0] in ('PSCAN', 'ISCAN') or w[0].startswith('CL'):
-                # Classic BT (BR/EDR) air bridge (WIP): the glasses are page/inquiry scanning. Log the
-                # activity (cs, our BD_ADDR, control words, any queued TX) so the inline classic
-                # descriptor + packet format can be mapped. No page offered yet -> NONE.
+                # Classic BT (BR/EDR) air bridge. Log the scan activity; after a few page-scan windows
+                # offer a PAGE so the controller injects RxAct and we can observe the firmware's classic
+                # RX path (which EM fields it reads -> the rxdesc layout).
                 if c.classic_log_n < 30:
                     c.say('CLASSIC %s' % line.rstrip())
                     c.classic_log_n += 1
                 reply = 'NONE'
+                if w[0] == 'PSCAN' and os.environ.get('CLASSIC_PAGE'):
+                    c.pscan_n += 1
+                    if c.pscan_n == int(os.environ.get('CLASSIC_PAGE_AT', '8')) and not c.classic_paged:
+                        c.classic_paged = True
+                        # PAGE <master-bdaddr>: the phone's address the glasses will learn from the FHS.
+                        reply = 'PAGE c0c0ffee0001'
+                        c.say('CLASSIC -> PAGE (offer page to glasses)')
             else:
                 reply = 'NONE'
             try:

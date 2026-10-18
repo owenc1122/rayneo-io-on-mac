@@ -1,0 +1,2 @@
+# Normal boot (no page). The btcRam env window is a logging peripheral under PROBE=1.
+emulation RunFor "12"
