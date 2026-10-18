@@ -1,0 +1,8 @@
+# Classic-BT HFP incoming call: after boot (SPP up) the phone AG opens the SLC to the glasses' HF,
+# runs the AT handshake and raises an incoming call. Give it time, then wake the screen and capture.
+emulation RunFor "20"
+gpio0 Pulse 1 false 120
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-hfpcall.pgm
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-hfpcall2.pgm
