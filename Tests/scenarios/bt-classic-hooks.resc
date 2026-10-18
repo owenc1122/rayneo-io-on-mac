@@ -1,0 +1,11 @@
+# Classic BT research hooks (include before boot): trace classic activities + the rwip slave page path.
+btcRadio TraceEvents true
+btc AddHook 0x6041fee4 "print('[AP:out] FHS_CHECK')"
+btc AddHook 0x6041ffb0 "print('[AP:out] POLL_CHECK')"
+btc AddHook 0x6041fddc "print('[AP:out] PAGE_RESPONSE_SETUP')"
+btc AddHook 0x60473c1c "print('[AP:out] SCHED_INSERT')"
+btc AddHook 0x6040477c "print('[AP:out] CONN_FOUND')"
+btc AddHook 0x60420028 "print('[AP:out] CONNECT_MSG r0=%d' % self.GetRegister(0).RawValue)"
+btc AddHook 0x6042f4c8 "print('[AP:out] ACL_RX link=%d n=%d m=%d' % (self.GetRegister(0).RawValue, self.GetRegister(2).RawValue, self.GetRegister(3).RawValue))"
+btc AddHook 0x604314b8 "print('[AP:out] ACL_CBK link=%d st=%d' % (self.GetRegister(1).RawValue, self.GetRegister(2).RawValue))"
+btc AddHook 0x604270bc "print('[AP:out] ACL_TXSCHED')"

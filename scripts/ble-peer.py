@@ -14,6 +14,7 @@ GATT database, and answers the glasses' own GATT client requests with "attribute
 import argparse, os, socket, struct, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rnlink
+import bredr
 
 LL_VERSION_IND, LL_UNKNOWN_RSP, LL_FEATURE_REQ, LL_FEATURE_RSP = 0x0c, 0x07, 0x08, 0x09
 LL_PERIPHERAL_FEATURE_REQ, LL_REJECT_EXT_IND, LL_LENGTH_REQ, LL_LENGTH_RSP = 0x0e, 0x11, 0x14, 0x15
@@ -47,9 +48,6 @@ class Central:
         self.rn_pending = []            # rnlink GATT reassembly: list of incomplete frames (glasses -> phone)
         self.rn = None                  # RnlinkPhone, attached by main()
         self.log_raw = False            # dump raw notify chunks (debug)
-        self.classic_log_n = 0          # classic-BT (BR/EDR) air bridge: cap logging
-        self.pscan_n = 0                # page-scan windows seen
-        self.classic_paged = False      # offered a page yet
         self.glasses_addr = b''
 
     def say(self, *a):
@@ -346,12 +344,14 @@ def main():
     srv.listen(1)
     c = Central(log)
     c.rn = rnlink.RnlinkPhone(c.say, c.rnlink_send, c)
+    c.bredr = bredr.ClassicPhone(c.say)
     c.say('waiting for the emulator on port %d' % a.port)
     # Re-accept across reconnects: a dropped model connection (or a stray probe) must not kill us.
     while True:
         conn, _ = srv.accept()
         f = conn.makefile('rw', newline='\n')
         c.__init__(log); c.rn = rnlink.RnlinkPhone(c.say, c.rnlink_send, c)   # fresh per model session
+        c.bredr = bredr.ClassicPhone(c.say)
         c.log_raw = a.raw
         c.say('emulator connected')
         for line in f:
@@ -371,21 +371,9 @@ def main():
                     hdr, data = p.split(':')
                     c.on_glasses_pdu(int(hdr, 16), bytes.fromhex(data))
                 reply = 'OK'
-            elif w[0] in ('PSCAN', 'ISCAN') or w[0].startswith('CL'):
-                # Classic BT (BR/EDR) air bridge. Log the scan activity; after a few page-scan windows
-                # offer a PAGE so the controller injects RxAct and we can observe the firmware's classic
-                # RX path (which EM fields it reads -> the rxdesc layout).
-                if c.classic_log_n < 30:
-                    c.say('CLASSIC %s' % line.rstrip())
-                    c.classic_log_n += 1
-                reply = 'NONE'
-                if w[0] == 'PSCAN' and os.environ.get('CLASSIC_PAGE'):
-                    c.pscan_n += 1
-                    if c.pscan_n == int(os.environ.get('CLASSIC_PAGE_AT', '8')) and not c.classic_paged:
-                        c.classic_paged = True
-                        # PAGE <master-bdaddr>: the phone's address the glasses will learn from the FHS.
-                        reply = 'PAGE c0c0ffee0001'
-                        c.say('CLASSIC -> PAGE (offer page to glasses)')
+            elif w[0] in ('PSCAN', 'ISCAN', 'SLAVE', 'CTX') or w[0].startswith('CL'):
+                # Classic BT (BR/EDR): the phone side of the baseband (scripts/bredr.py).
+                reply = c.bredr.on_activity(w)
             else:
                 reply = 'NONE'
             try:

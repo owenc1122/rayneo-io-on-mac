@@ -15,7 +15,7 @@
 // Exchange table entry (16 bytes): +0 ctrl ([2:0] mode 1=BT 2=BLE, [5:3] status),
 //   +2/+4 raw start half-slot (16+12 bits), +6 624-halfus, +0xa max duration (bit15: half-slots,
 //   else microseconds). Status: 1 programmed, 2 started, 3 ended normally, 6 skipped.
-// No radio: activities run for their programmed duration and end without RX traffic.
+// With PeerPort set, BLE and classic activities are bridged to a virtual peer (see below).
 using System;
 using System.Collections.Generic;
 using Antmicro.Renode.Core;
@@ -286,48 +286,93 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 peer?.Dispose(); peer=null;
             }
         }
-        // ---- Classic BT (BR/EDR) mode-1 air bridge (WIP) -------------------------------------
-        // Classic activities share the aa55 exchange table but carry an inline control structure (cs,
-        // 0x78 B per link) in btcExchange at 0x6d02eaa8 + link*0x78. cs+0 = format (0x8045 page
-        // scan/response, 0x8044 inquiry scan), cs+8..0xd = BD_ADDR, cs+0x14 = control word (bit15 go).
-        // The real radio runs a page / page-response / FHS handshake; here we bridge it to a classic
-        // peer. First increment: hand the scan to the peer and log the firmware's classic TX so the
-        // inline RX/TX descriptor + packet format can be mapped empirically (RX injection is next).
+        // ---- Classic BT (BR/EDR) mode-1 air bridge ---------------------------------------------
+        // Classic activities use the same exchange table; their control structure (cs, 0x78 B per link)
+        // sits in EM at ClCsBase + link*0x78: +0 format ([4:0] 5 page scan, 4 inquiry scan, 3 slave
+        // page response, ...), +8..0xd BD_ADDR, +0x14 control (bit15 go), +0x52/+0x54 the native clock
+        // (28-bit half-slot count, 16+12 bits) latched when a packet is received.
+        // Received packets go to the classic RX descriptor ring the BTC firmware reads in its frame
+        // callbacks (rwip ld_pscan: FUN_6041fee4 / FUN_6041ffb0 / FUN_6041d3d8 / FUN_6041d374):
+        // ClRxCount descriptors of 0x18 B at ClRxDesc; +0 bit15 RX done, +2 bits[15:11] link label and
+        // low bits error flags (0 = sync/HEC/CRC ok), +4 packet header ([2:0] LT_ADDR, [6:3] TYPE),
+        // +0xc pointer (halfwords from the EM base) to the buffer holding the payload (e.g. the
+        // 18-byte FHS). The hardware fills them in ring order; the firmware consumes in the same order.
+        //   model -> peer: "<KIND> <cs> <bdaddr> link=<n> clk=<native clock hex> fmt=<n>"
+        //   peer -> model: "RX <type> <lt_addr> <payload hex>" | "NONE"
         private void AirExchangeClassic(ref Activity act) {
             int fmt=EmRW(act.Cs)&0x1f;
             try {
-                string kind = fmt==5 ? "PSCAN" : fmt==4 ? "ISCAN" : ("CL"+fmt);
+                string kind = fmt==5 ? "PSCAN" : fmt==4 ? "ISCAN" : fmt==3 ? "SLAVE" : ("CL"+fmt);
+                int link=(int)((act.Cs-ClCsBase)/0x78);
+                ulong clk=(act.Start/HalfSlot)&ClockMask;
                 var line=new System.Text.StringBuilder();
-                line.AppendFormat("{0} {1:x} {2}",kind,act.Cs,BdAddr(act.Cs));
-                // control word + the two pointer-ish cs fields, plus any TX chain the firmware queued.
-                line.AppendFormat(" ctl={0:x4} f14={1:x4} f18={2:x4}",EmRW(act.Cs),EmRW(act.Cs+0x14),EmRW(act.Cs+0x18));
-                var tx=TxChain(act.Cs,false);
-                foreach(var d in tx) line.Append(" tx=").Append(d);
+                line.AppendFormat("{0} {1:x} {2} link={3} clk={4:x} fmt={5}",kind,act.Cs,BdAddr(act.Cs),link,clk,fmt);
                 string reply=PeerCall(line.ToString());
-                // "PAGE <hex>" carries the pager's ID/FHS. Observation step: raise RxAct (fifo bit4)
-                // for this page-scan activity so the firmware's RX path runs; hooks on the rwip page
-                // functions + asserts then reveal which EM fields it reads (the classic rxdesc layout).
-                // ClassicRxPattern fills a 0xA5A5 pattern into the EM RX window first.
-                if(reply.StartsWith("PAGE ") && !classicPaged) {
-                    classicPaged=true;
-                    if(TraceEvents) this.Log(LogLevel.Info,"classic page offered: {0} -> inject RxAct on ET{1} cs {2:x}",reply.Substring(5),act.Index,act.Cs);
-                    ClassicRxPattern(act.Cs);
-                    fifo.Enqueue(((uint)act.Index<<24)|RxAct);
-                    act.Length=Math.Min(act.Length,1200);
+                if(reply.StartsWith("RX ")) {
+                    // RX <type> <lt_addr> [<llid> <payload hex>]
+                    var parts=reply.Split(' ');
+                    int type=Convert.ToInt32(parts[1],16), lt=Convert.ToInt32(parts[2],16);
+                    int llid=parts.Length>4 ? Convert.ToInt32(parts[3],16) : -1;
+                    var payload=parts.Length>4 ? Hex(parts[4]) : parts.Length>3 ? Hex(parts[3]) : new byte[0];
+                    // The master's packet starts the slot pair; latch the native clock of that slot.
+                    ulong rxClk=((act.Start+2*HalfSlot)/HalfSlot)&ClockMask;
+                    WriteClassicRx(act.Cs,link,type,lt,llid,payload,rxClk);
+                    if(fmt==3) {
+                        // Slave: answer in the next slot with the descriptor the link layer queued (or NULL).
+                        var tx=ClassicTx(link);
+                        PeerCall(string.Format("CTX {0:x} link={1} {2}",act.Cs,link,tx ?? "NULL"));
+                    }
+                    act.Length=Math.Min(act.Length,4*HalfSlot);   // the exchange ends the event
                 }
             } catch(Exception e) {
                 this.Log(LogLevel.Warning,"classic peer: {0}",e.Message);
                 peer?.Dispose(); peer=null;
             }
         }
-        // Observation aid: fill the classic cs tail (beyond the fields the firmware itself set) with a
-        // 0xA5A5 pattern so that whatever rxdesc field the page RX path reads shows up distinctively in
-        // the rwip asserts. Preserves cs+0 (format) and cs+0x14 (control) which the firmware owns.
-        private void ClassicRxPattern(ulong cs) {
-            for(ulong o=0x20;o<0x78;o+=2) EmWW(cs+o,0xa5a5);
-            if(TraceEvents) this.Log(LogLevel.Info,"classic rxdesc reg828={0:x} cs+0x1c={1:x4} cs+0x26={2:x4}",base.ReadDoubleWord(0x828),EmRW(cs+0x1c),EmRW(cs+0x26));
+        // Slave TX: two descriptors per link at ClTxDesc + (link*2+n)*0x10, used alternately
+        // (rwip ld_acl: FUN_604270bc fills, FUN_604292d0 frees): +0 bit15 transmitted (set by the radio,
+        // cleared by the link layer when it queues the descriptor), +2 header ([6:3] TYPE, cleared once
+        // freed), +4 payload header ([1:0] LLID, bit2 FLOW, [14:3] length), +6 ACL buffer and +8 LMP
+        // buffer (halfword pointers from the EM base). Queued = bit15 of +0 clear and TYPE != 0.
+        // Returns "<type> <llid> <hex>".
+        private string ClassicTx(int link) {
+            int n=clTxIdx.TryGetValue(link,out var v) ? v : 0;
+            ulong d=ClTxDesc+(ulong)(link*2+n)*0x10;
+            ushort done=EmRW(d), hdr=EmRW(d+2), ph=EmRW(d+4), acl=EmRW(d+6), lmp=EmRW(d+8);
+            int type=(hdr>>3)&0xf, len=(ph&0x7fff)>>3, llid=ph&3;
+            if((done&0x8000)!=0 || type==0) return null;            // nothing new queued
+            ulong buf=exchangeTable+(ulong)(lmp!=0 ? lmp : acl)*2;
+            var sb=new System.Text.StringBuilder(); sb.AppendFormat("{0:x} {1:x} ",type,llid);
+            if(lmp!=0 || acl!=0) for(int i=0;i<len;i++) sb.AppendFormat("{0:x2}",EmRB(buf+(ulong)i));
+            EmWW(d,(ushort)(done|0x8000));                    // acknowledged by the master
+            clTxIdx[link]=n^1;
+            if(TraceEvents) this.Log(LogLevel.Info,"classic TX link {0} desc {1}: {2}",link,link*2+n,sb);
+            return sb.ToString().Trim();
         }
-        private bool classicPaged;
+        private readonly Dictionary<int,int> clTxIdx=new Dictionary<int,int>();
+        private void WriteClassicRx(ulong cs,int link,int type,int lt,int llid,byte[] payload,ulong rxClk) {
+            ulong d=ClRxDesc+(ulong)clRxIdx*0x18;
+            ushort w0=EmRW(d);
+            if((w0&0x8000)!=0) { this.Log(LogLevel.Warning,"classic RX ring full at {0}, packet dropped",clRxIdx); return; }
+            // FHS and LMP payloads go to the descriptor's +0xc buffer, ACL (L2CAP) data to its +0xa buffer.
+            bool acl=llid==1 || llid==2;
+            ushort ptr=EmRW(d+(acl ? 0xaUL : 0xcUL));
+            if(ptr==0 && payload.Length>0) { this.Log(LogLevel.Warning,"classic RX descriptor {0} has no buffer, packet dropped",clRxIdx); return; }
+            ulong buf=exchangeTable+(ulong)ptr*2;
+            for(int i=0;i<payload.Length;i++) EmWB(buf+(ulong)i,payload[i]);
+            EmWW(d+2,(ushort)((link&0x1f)<<11));              // link label, no sync/HEC/CRC errors
+            EmWW(d+4,(ushort)(((type&0xf)<<3)|(lt&7)));
+            EmWW(d+6,(ushort)(llid<0 ? 0 : ((payload.Length<<3)|(llid&3))));
+            EmWW(d+8,0);
+            EmWW(cs+0x52,(ushort)(rxClk&0xffff));
+            EmWW(cs+0x54,(int)(((uint)EmRW(cs+0x54)&0xf000u)|(uint)((rxClk>>16)&0xfff)));
+            EmWW(d,(ushort)(w0|0x8000));                      // RX done
+            if(TraceEvents) this.Log(LogLevel.Info,"classic RX desc {0} link {1} type {2} lt {3} llid {4} len {5} buf {6:x}",clRxIdx,link,type,lt,llid,payload.Length,buf);
+            clRxIdx=(clRxIdx+1)%ClRxCount;
+        }
+        private int clRxIdx;
+        private const ulong ClCsBase=0x6d02eaa8, ClRxDesc=0x6d02efd0, ClTxDesc=0x6d02f048;
+        private const int ClRxCount=5;
         private string BdAddr(ulong cs) { var sb=new System.Text.StringBuilder();
             for(ulong i=0;i<6;i++) sb.AppendFormat("{0:x2}",EmRB(cs+0x8+i));
             return sb.ToString();
