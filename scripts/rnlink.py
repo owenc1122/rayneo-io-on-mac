@@ -9,6 +9,7 @@ An ACK frame is the special case business/ctrl where the whole thing is 'aa55 00
 Inside an RNLINK (business 0x10) payload the first byte is a command; dev-info / auth use
 TLV items: tag:u8 | length:u16be | value. Business ids (BUSINESS_ID_*) from the firmware table.
 """
+import os
 import struct
 
 BUSINESS = {0: 'RESERVED', 1: 'APP_MARKET', 2: 'SHORTCUTS', 3: 'GYRO_CORRECTION', 4: 'WHISPER_MODE',
@@ -137,6 +138,85 @@ def pb_msg(type_, message=None, data=None, sequence=None, mode=None):
     return pb_encode(f)
 
 
+# ---- File transfer (core/file_transfer in the AP firmware) ---------------------------------------
+# Rides rnlink business 0x11 (file_bt_send -> rnlink_send_payload(0x11, ...); handle_complete_packet
+# routes 0x11 straight to ft_on_file_transfer_recv). Payload = protobuf filetransfer.TransferMessage
+# (field numbers from the protobuf-c descriptors, rnlink-proto/filetransfer.proto):
+#   TransferMessage { 1 file_info_sync, 2 file_info_ack, 3 file_chunk_req, 4 file_chunk, 5 file_recv_state }
+#   FileInfoSync  { 1 uuid, 2 file_name, 3 file_size:u64, 4 md5 (lowercase hex), 5 bus_id }
+#   FileInfoAck   { 1 uuid }
+#   FileChunkReq  { 1 uuid, 2 chunk_id, 3 chunk_start:u64, 4 chunk_size }
+#   FileChunk     { 1 uuid, 2 chunk_id, 3 chunk_start:u64, 4 chunk_size, 5 chunk_data }
+#   FileRecvState { 1 uuid, 2 state (0 SUCCESS, 1 FAIL), 3 reason }
+# PULL model, the glasses' file_receiver drives it: phone FileInfoSync -> glasses FileInfoAck +
+# FileChunkReq (<= 0x5000 B each) -> phone FileChunk (chunk_size must equal len(chunk_data)) -> ...
+# -> glasses md5-checks the whole buffer -> FileRecvState SUCCESS -> rnlink_if_on_file_recv hands
+# {content, size, file_name, uuid, bus_id} to every feature's onFileRecv (bus_id picks the feature:
+# 0x14 prompter, 9 FOTA). The prompter uses file_name as the script's did.
+FT_BUSINESS = 0x11
+FT_MSG = {1: 'file_info_sync', 2: 'file_info_ack', 3: 'file_chunk_req', 4: 'file_chunk',
+          5: 'file_recv_state'}
+
+
+class FileSender:
+    """Phone side of the rnlink file transfer: offers one file at a time and serves chunk requests."""
+
+    def __init__(self, phone):
+        self.phone = phone
+        self.cur = None             # dict(uuid, name, data, bus_id, on_done)
+        self.queue = []
+        self.done = []              # (uuid, state, reason) of finished transfers
+
+    def send_file(self, bus_id, name, data, uuid=None, on_done=None):
+        import hashlib, uuid as _uuid
+        f = {'uuid': uuid or str(_uuid.uuid4()), 'name': name, 'data': data, 'bus_id': bus_id,
+             'md5': hashlib.md5(data).hexdigest(), 'on_done': on_done, 'served': 0}
+        if self.cur:
+            self.queue.append(f); return f['uuid']
+        self._start(f)
+        return f['uuid']
+
+    def _start(self, f):
+        self.cur = f
+        info = pb_encode({1: f['uuid'], 2: f['name'], 3: len(f['data']), 4: f['md5'], 5: f['bus_id']})
+        self.phone.say('ft -> file_info_sync uuid=%s name=%s size=%d md5=%s bus=0x%02x' % (
+            f['uuid'], f['name'], len(f['data']), f['md5'], f['bus_id']))
+        self._tx({1: info})
+
+    def _tx(self, msg):
+        self.phone.tx(FT_BUSINESS, pb_encode(msg), ctrl=self.phone._pctrl())
+
+    def on_message(self, payload):
+        tm = pb_decode(payload)
+        for num, body in tm.items():
+            m = pb_decode(body) if isinstance(body, bytes) else {}
+            name = FT_MSG.get(num, 'msg%d' % num)
+            uuid = m.get(1, b'').decode('latin1') if isinstance(m.get(1), bytes) else ''
+            f = self.cur
+            if num == 3:                            # chunk request
+                cid, start, size = m.get(2, 0), m.get(3, 0), m.get(4, 0)
+                self.phone.say('ft <- file_chunk_req uuid=%s id=%d start=%d size=%d' % (uuid, cid, start, size))
+                if not f or f['uuid'] != uuid:
+                    self.phone.say('ft   (no such transfer)'); continue
+                data = f['data'][start:start + size]
+                f['served'] = max(f['served'], start + len(data))
+                self._tx({4: pb_encode({1: uuid, 2: cid, 3: start, 4: len(data), 5: data})})
+            elif num == 5:                          # receive state
+                state, reason = m.get(2, 0), m.get(3, b'').decode('utf8', 'replace') if m.get(3) else ''
+                self.phone.say('ft <- file_recv_state uuid=%s state=%s %s' % (
+                    uuid, 'SUCCESS' if state == 0 else 'FAIL', reason))
+                self.done.append((uuid, state, reason))
+                if f and f['uuid'] == uuid:
+                    self.cur = None
+                    if f['on_done']:
+                        f['on_done'](state == 0, reason)
+                    if self.queue:
+                        self._start(self.queue.pop(0))
+            else:
+                self.phone.say('ft <- %s %s' % (name, {k: (v if isinstance(v, int) else v[:64])
+                                                       for k, v in m.items()}))
+
+
 class RnlinkPhone:
     """Phone-side rnlink logic: completes the dev-info + auth handshake, then services features.
 
@@ -159,6 +239,7 @@ class RnlinkPhone:
         self.authed = False
         self.rand = bytes.fromhex('a5b4c3d2')
         self.glasses_dev_addr = b''
+        self.ft = FileSender(self)
 
     # ---- outbound ----
     def tx(self, business, payload, ctrl=0):
@@ -213,19 +294,10 @@ class RnlinkPhone:
             self.on_assistant(payload)
         elif business == 0x14:
             self.on_prompter(payload)
+        elif business == FT_BUSINESS:
+            self.ft.on_message(payload)
         elif business in (0x0f, 0x0e, 0x0c, 0x18):
             self.on_feature(business, payload)
-        # Pace the prompter sequence off the glasses' continuous inbound frames: one prompter frame
-        # every few connection events, so each (large) frame is fully drained from the GATT queue and
-        # reassembled before the next is sent. A tight list->transfer->start burst overruns the glasses'
-        # rnlink reassembly and the later frames are silently dropped (only the file-list is received).
-        if getattr(self, 'prompter_step', 0):
-            self.prompter_tick = getattr(self, 'prompter_tick', 0) + 1
-            if self.prompter_tick % 6 == 0:
-                if self.prompter_step == 1:
-                    self.send_prompter_transfer(); self.prompter_step = 2
-                elif self.prompter_step == 2:
-                    self.remote_start_prompter(); self.prompter_step = 3
 
     # ---- AiSubtitle (live captions / translation), business 0x13 ----
     # PbMsg{type, message=JSON}: type 1 START_REQUEST, 2 START_REPLY, 3 END_REQUEST, 5 DISPLAY_TEXT,
@@ -397,12 +469,17 @@ class RnlinkPhone:
     #     NB: chunkid/total_items/islast live INSIDE chunkinfo (JsonHelper::parseFileListUpdateMsg
     #     reads them from the chunkinfo object). "type" is the updateFileList switch: 1 FullSync.
     #     item: {did,pin,title,offset,timestamp,timezone,preview}
-    #   file-transfer (type 2): {action,did,total,...} + raw script bytes in PbMsg.data (field4).
-    #     action 1 = send data (triggers PrompterAPI::requestStartUi), 2 = cancel.
-    #   remote-start (type 3): {action,did,pageOffset,highLightOffset,total}; action 23 (0x17) = confirm.
-    # The three are paced (sent one per glasses ACK), because a back-to-back burst can overrun the
-    # glasses' rnlink reassembly under load and drop the later frames. The glasses ACKs each with a
-    # PbMsg type-1 {action,type,code,chunkid}: action 1 = list received, 2 = transfer received.
+    #   file-transfer (type 2): {action,did,total,chunkid,islast,offset}; action 1 = request (opens
+    #     the prompter, PrompterAPI::requestStartUi), 2 = cancel. No content in it: the glasses reply
+    #     type 2 {action:2,...,code:1} = ready, and the script BYTES then go over the rnlink file
+    #     transfer (business 0x11, FileSender) with bus_id 0x14 and file_name = did. Once
+    #     notifyFileRecv has built the preview the glasses send type 2 code 7.
+    #   remote-start (type 3): {action:2,code,did,pageOffset,highLightOffset,total}; on a loaded
+    #     preview code 1 starts it (0x17 confirm / 0x18 cancel a pending start).
+    #   mode setting (type 7): {action:1,did,countdown,scroll,speed,gear,depth,size,width,leading};
+    #     scroll 2 = auto scroll at `speed` (the reading highlight advances and lines scroll up).
+    # Flow: list -> transfer request -> (code 1) file transfer -> (code 7) mode setting + start.
+    # The glasses ack the list with type 1 {action,type,code,chunkid} and report progress as type 8.
     def on_prompter(self, payload):
         import json
         pb = pb_decode(payload); typ = pb.get(2)
@@ -412,12 +489,18 @@ class RnlinkPhone:
         except Exception:
             msg = {}
         self.say('rnlink PROMPTER <- type=%s %s' % (typ, msg))
-        # The glasses replies to the transfer *request* with type 2 {action:2, total, code:1} = "ready,
-        # send me the content". Now the did is in the receiving state, so re-send the transfer carrying
-        # the actual script bytes; that write loads the content and the view scrolls it.
+        # The glasses reply to the transfer request with type 2 {action:2, total, code:1} = "ready, send
+        # the content": the did is now the active receive session, so push the script file.
         if typ == 2 and msg.get('code') == 1 and not getattr(self, 'prompter_sent_content', False):
             self.prompter_sent_content = True
-            self.send_prompter_content()
+            self.send_prompter_file()
+            return
+        # type 2 code 7 = the script content arrived over the file transfer and the preview is ready
+        # (notifyFileRecv -> notifyPreviewReady): now the remote start can actually start scrolling.
+        if typ == 2 and msg.get('code') == 7 and not getattr(self, 'prompter_started', False):
+            self.prompter_started = True
+            self.set_prompter_mode()
+            self.remote_start_prompter(code=1)
             return
         # The glasses pulls the list on connect (requestFileListSync); push the full sequence once.
         if not getattr(self, 'prompter_sent', False):
@@ -428,8 +511,15 @@ class RnlinkPhone:
         if text is None:
             text = ('欢迎使用提词器。\n'
                     '这是一段通过蓝牙从虚拟手机推送的演示文稿。\n'
+                    '文稿内容经由文件传输通道发送到眼镜，并通过校验。\n'
                     '文字会自动向上滚动，方便你在演讲时朗读。\n'
+                    '你可以在手机上调整滚动速度、字号和行距。\n'
                     '现在字幕、通知、语音助手都已经可以在模拟器里使用。\n'
+                    '天气、待办事项和设置同步也都由虚拟手机驱动。\n'
+                    '固件升级同样走蓝牙分片传输，并在眼镜上校验每个文件。\n'
+                    '演讲之前，记得先把文稿完整地读一遍。\n'
+                    '保持语速平稳，眼神自然地看向观众。\n'
+                    '遇到停顿也不要紧张，提词器会等你。\n'
                     '祝你演讲顺利！')
         did = getattr(self, 'prompter_did', '1792240000777')
         content = text.encode('utf-8')
@@ -444,38 +534,48 @@ class RnlinkPhone:
             lst['type'] = self.prompter_list_type
         self.say('rnlink PROMPTER -> file-list (type=%s) %s' % (lst['type'], did))
         self.tx(0x14, pb_msg(1, message=json.dumps(lst)), ctrl=self._pctrl())
-        # Send the transfer + remote-start in the same burst: the later frames only reach the prompter
-        # dispatcher when queued together with the list (a delayed/paced send is dropped in transit).
+        # Request the transfer right behind the list; the content and the start follow the glasses'
+        # type-2 replies (code 1 ready, code 7 preview loaded).
         self.send_prompter_transfer()
-        self.remote_start_prompter()
         self.prompter_sent = True
 
     def send_prompter_transfer(self):
         import json
         did, content = self.prompter_did, self.prompter_content
         # type 2: file transfer, action 1 = request/send (triggers PrompterAPI::requestStartUi and
-        # launches the prompter view). Raw script bytes ride in the PbMsg data field.
+        # launches the prompter view). The bytes follow over the file transfer once the glasses are ready.
         meta = {'action': 1, 'did': did, 'total': len(content), 'chunkid': 0, 'islast': True, 'offset': 0}
-        self.say('rnlink PROMPTER -> file-transfer (action=1) %d bytes' % len(content))
-        self.tx(0x14, pb_msg(2, message=json.dumps(meta), data=content), ctrl=self._pctrl())
+        self.say('rnlink PROMPTER -> file-transfer request (action=1) %d bytes' % len(content))
+        self.tx(0x14, pb_msg(2, message=json.dumps(meta)), ctrl=self._pctrl())
 
-    def send_prompter_content(self):
+    def send_prompter_file(self):
+        # The script bytes travel over the rnlink file transfer (business 0x11), bus_id 0x14, with
+        # file_name = the script's did (PrompterRnLinkMsgProcessor::notifyFileRecv matches it).
+        self.say('rnlink PROMPTER -> script via file transfer, %d bytes' % len(self.prompter_content))
+        self.ft.send_file(0x14, self.prompter_did, self.prompter_content)
+
+    def set_prompter_mode(self, scroll=None, speed=None, gear=None):
         import json
-        did, content = self.prompter_did, self.prompter_content
-        # Once the glasses is ready (its type-2 {action:2,code:1} reply), deliver the script content
-        # as a data chunk; the view then renders and scrolls it.
-        meta = {'action': 1, 'did': did, 'total': len(content), 'chunkid': 0, 'islast': True,
-                'offset': 0}
-        self.say('rnlink PROMPTER -> file-content %d bytes' % len(content))
-        self.tx(0x14, pb_msg(2, message=json.dumps(meta), data=content), ctrl=self._pctrl())
+        # type 7 ModeSetting (handleModeSetting): action 1 = apply the reading settings for a did.
+        # PROMPT_SCROLL / PROMPT_SPEED / PROMPT_GEAR override (scroll 0 is the stored default).
+        env = lambda k, d: int(os.environ.get(k, d))
+        msg = {'action': 1, 'did': self.prompter_did, 'countdown': 0,
+               'scroll': env('PROMPT_SCROLL', 2) if scroll is None else scroll,
+               'speed': env('PROMPT_SPEED', 40) if speed is None else speed,
+               'gear': env('PROMPT_GEAR', 3) if gear is None else gear,
+               'depth': 0, 'size': 0, 'width': 0, 'leading': 0}
+        self.say('rnlink PROMPTER -> mode setting %s' % msg)
+        self.tx(0x14, pb_msg(7, message=json.dumps(msg)), ctrl=self._pctrl())
 
-    def remote_start_prompter(self):
+    def remote_start_prompter(self, code=0):
         import json
         did = getattr(self, 'prompter_did', '1792240000777')
         total = len(getattr(self, 'prompter_content', b''))
         # handleRemoteStart: "action" (bStack_38) must be 2 to enter the start logic; "code"
-        # (bStack_1c) 0x17 confirms a pending start, 0x18 cancels, else = direct preview start.
-        msg = {'action': 2, 'code': 0, 'did': did, 'pageOffset': 0, 'highLightOffset': 0, 'total': total}
+        # (bStack_1c) 0x17 confirms a pending start, 0x18 cancels; on a loaded preview code 1 approves
+        # the start ("cache local preview start approval until countdown ends"), any other code just
+        # keeps the preview.
+        msg = {'action': 2, 'code': code, 'did': did, 'pageOffset': 0, 'highLightOffset': 0, 'total': total}
         self.say('rnlink PROMPTER -> remote-start (action=2) %s' % did)
         self.tx(0x14, pb_msg(3, message=json.dumps(msg)), ctrl=self._pctrl())
 

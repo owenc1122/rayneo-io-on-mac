@@ -1,8 +1,10 @@
-# Virtual phone pushes a teleprompter script (business 0x14) and remote-starts it; the glasses
-# should open the prompter view and scroll the pushed text. Capture after the push lands.
+# Virtual phone pushes a teleprompter script (business 0x14 list + transfer request), sends the
+# script bytes over the rnlink file transfer (business 0x11, bus_id 0x14) and remote-starts it once
+# the glasses report the content ready; the glasses scroll the pushed text. Two shots a few seconds
+# apart must differ (the text moves).
 emulation RunFor "35"
-gpio0 Pulse 1 false 120
-emulation RunFor "4"
 lcdc SaveFrame @OUT/shot-prompter.pgm
-emulation RunFor "4"
+emulation RunFor "6"
 lcdc SaveFrame @OUT/shot-prompter2.pgm
+emulation RunFor "6"
+lcdc SaveFrame @OUT/shot-prompter3.pgm

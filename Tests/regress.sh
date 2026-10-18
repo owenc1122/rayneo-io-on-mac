@@ -63,6 +63,7 @@ phone assistant 30 bt-assistant.txt
 phone btrecord 25 bt-record.txt RECORD_DEMO=1
 phone settings 30 bt-settings.txt SETTINGS_DEMO=1
 phone todo 30 bt-todo.txt TODO_DEMO=1
+phone prompter 48 bt-prompter.txt PROMPT_DEMO=1
 for p in $jobs_pids; do wait "$p"; done
 kill $peer_pids 2>/dev/null
 fi
@@ -71,7 +72,7 @@ fail=0
 check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fail=1; fi; }
 n() { c=$(grep -ac "$2" "$out/$1/boot.log" 2>/dev/null); echo "${c:-0}"; }
 shots() { ls "$out/$1" 2>/dev/null | grep -c '^shot-'; }
-for r in crown rotate bt record speaker wake wakeneg headup weather subtitle notification assistant btrecord settings todo; do
+for r in crown rotate bt record speaker wake wakeneg headup weather subtitle notification assistant btrecord settings todo prompter; do
     check "$r: no firmware assert" "[ \$(n $r 'dump_assert_info: Assert') -eq 0 ]"
 done
 check "crown: 10 screenshots" "[ \$(shots crown) -eq 10 ]"
@@ -84,7 +85,7 @@ check "wake: 小雷小雷 confirmed" "[ \$(n wake 'wake word confirmed') -gt 0 ]
 check "headup: neck monitor sent head up while screen off" "[ \$(n headup 'Sent head up event') -gt 0 ]"
 check "headup: screen turned on by head-up" "[ \$(n headup 'screen on by headup=1') -gt 0 ]"
 check "wake-negative: no wake" "[ \$(n wakeneg 'wake word confirmed') -eq 0 ]"
-for r in weather subtitle notification assistant btrecord settings todo; do
+for r in weather subtitle notification assistant btrecord settings todo prompter; do
     check "$r: rnlink auth" "[ \$(n $r 'auth success') -gt 0 ]"
 done
 # On-screen checks: a firmware log line that only appears once the phone-driven content is rendered.
@@ -97,5 +98,10 @@ check "settings: phone config applied (head-up threshold)" "[ \$(n settings 'app
 check "settings: glasses reports config back (both ways)" "[ \$(n settings 'sending wakeup_config report') -gt 0 ]"
 check "settings: phone-enabled head-up wakes the screen (headup=1)" "[ \$(n settings 'screen on by headup=1') -gt 0 ]"
 check "todo: item pushed and inserted on the card" "[ \$(n todo 'result=insert') -gt 0 ]"
+# rnlink file transfer (business 0x11): pull handshake + md5 verified on the glasses.
+check "filetransfer: glasses verified the file and sent FileRecvState SUCCESS" "[ \$(n prompter 'send_file_recv_state_success') -gt 0 ] && grep -q 'file_recv_state .* state=SUCCESS' '$out/prompter/peer.log'"
+check "prompter: pushed script delivered to the prompter (file info created)" "[ \$(n prompter 'notifyFileRecv - file info created successfully') -gt 0 ]"
+check "prompter: remote start runs the prompter (state=1, auto scroll)" "[ \$(n prompter 'state=1, pageOffset=0, highLightOffset=0, elapsedSeconds=0, countdown=0, scroll=2') -gt 0 ]"
+check "prompter: text moves on screen (reading highlight/scroll between shots)" "python3 scripts/check-frames.py '$out/prompter/shot-prompter.pgm' '$out/prompter/shot-prompter3.pgm' 25 > /dev/null"
 echo "results in $out"
 exit $fail

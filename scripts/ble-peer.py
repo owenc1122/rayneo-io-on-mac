@@ -34,6 +34,7 @@ class Central:
         self.queue = []                 # pending central PDUs: (llid, payload)
         self.rx_l2cap = b''            # reassembly of glasses -> central L2CAP
         self.mtu = 23
+        self.max_pdu = 27                               # LL data PDU payload (27 until DLE)
         self.gatt_step = 'mtu'
         self.services = []
         self.chars = []
@@ -97,12 +98,15 @@ class Central:
                 self.queue.append((3, bytes([LL_FEATURE_RSP]) + bytes.fromhex('ff79010000000000')))
             elif op == LL_LENGTH_REQ:
                 self.queue.append((3, bytes([LL_LENGTH_RSP]) + struct.pack('<HHHH', 251, 2120, 251, 2120)))
+                self.set_max_pdu(payload)
+            elif op == LL_LENGTH_RSP:
+                self.set_max_pdu(payload)
             elif op in (LL_CONNECTION_PARAM_REQ, LL_PHY_REQ):
                 self.queue.append((3, bytes([LL_REJECT_EXT_IND, op, 0x1a])))
             elif op == LL_TERMINATE_IND:
                 self.say('glasses terminated the connection, reason 0x%02x' % payload[1])
                 self.connected_cs = None
-            elif op in (LL_FEATURE_RSP, LL_LENGTH_RSP, LL_UNKNOWN_RSP, LL_REJECT_EXT_IND, 0x09):
+            elif op in (LL_FEATURE_RSP, LL_UNKNOWN_RSP, LL_REJECT_EXT_IND, 0x09):
                 pass
             else:
                 self.queue.append((3, bytes([LL_UNKNOWN_RSP, op])))
@@ -112,6 +116,15 @@ class Central:
         elif llid == 1 and payload:
             self.rx_l2cap += payload
             self.l2cap_check()
+
+    def set_max_pdu(self, payload):
+        # Data Length Extension: once the glasses state their MaxRxOctets (LENGTH_REQ/RSP), send data
+        # PDUs up to min(that, 251) instead of 27 (10x fewer connection events per ATT write; large
+        # rnlink frames such as OTA slices otherwise outlast the glasses' 20 s peer-reply timeout).
+        if len(payload) >= 9:
+            rx_octets = struct.unpack_from('<H', payload, 1)[0]
+            self.max_pdu = max(27, min(251, rx_octets))
+            self.say('data length: max PDU %d' % self.max_pdu)
 
     def l2cap_check(self):
         if len(self.rx_l2cap) < 4:
@@ -139,7 +152,8 @@ class Central:
         frame = struct.pack('<HH', len(sdu), cid) + sdu
         first = True
         while frame:
-            chunk, frame = frame[:27], frame[27:]
+            n = self.max_pdu
+            chunk, frame = frame[:n], frame[n:]
             self.queue.append((2 if first else 1, chunk))
             first = False
 
