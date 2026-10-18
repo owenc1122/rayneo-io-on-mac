@@ -117,7 +117,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private static double[] Fill(int n, double v) { var a = new double[n]; for(int i = 0; i < n; i++) a[i] = v; return a; }
 
         // ---- MFCC
-        private static void Frame(double[] x, int at, out double[] cep, out double energy)
+        public static void Frame(double[] x, int at, out double[] cep, out double energy)
         {
             var re = new double[Nfft]; var im = new double[Nfft];
             double prev = at > 0 ? x[at - 1] : x[at];

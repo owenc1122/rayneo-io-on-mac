@@ -64,10 +64,17 @@ run crown 20 crown.txt
 run rotate 16 rotate.txt
 run bt 15 bt-reconnect.txt
 run record 16 record.txt MIC="$ta/wake-xiaolei.wav"
+run recordnoisy 16 record.txt MIC="$ta/wake-xiaolei-noise.wav"
 run speaker 16 speaker.txt
 run wake 16 wake.txt VOICE_WAKE=1 MIC="$ta/wake-xiaolei.wav" MIC_LOOP=0
 run headup 45 headup.txt
 run wakeneg 16 wake-negative.txt VOICE_WAKE=1 MIC="$ta/confusables.wav" MIC_LOOP=0
+# more voices / noise for the wake word: other speakers and 5-10 dB noise must wake, other phrases and noise must not
+run wakemeijia 16 wake.txt VOICE_WAKE=1 MIC="$ta/wake-meijia.wav" MIC_LOOP=0
+run wakereed 16 wake.txt VOICE_WAKE=1 MIC="$ta/wake-reed-noise.wav" MIC_LOOP=0
+run wakenoisy 16 wake.txt VOICE_WAKE=1 MIC="$ta/wake-xiaolei-noise.wav" MIC_LOOP=0
+run wakeneg2 16 wake-negative.txt VOICE_WAKE=1 MIC="$ta/confusables2.wav" MIC_LOOP=0
+run wakenoise 16 wake-negative.txt VOICE_WAKE=1 MIC="$ta/noise-only.wav" MIC_LOOP=0
 phone weather 30 bt-weather.txt
 phone subtitle 30 bt-subtitle.txt
 phone notification 30 bt-notification.txt NOTIF_DEMO=1
@@ -87,7 +94,7 @@ fail=0
 check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fail=1; fi; }
 n() { c=$(grep -ac "$2" "$out/$1/boot.log" 2>/dev/null); echo "${c:-0}"; }
 shots() { ls "$out/$1" 2>/dev/null | grep -c '^shot-'; }
-for r in crown rotate bt record speaker wake wakeneg headup weather subtitle notification assistant btrecord settings todo prompter ota; do
+for r in crown rotate bt record recordnoisy speaker wake wakeneg wakemeijia wakereed wakenoisy wakeneg2 wakenoise headup weather subtitle notification assistant btrecord settings todo prompter ota; do
     check "$r: no firmware assert" "[ \$(n $r 'dump_assert_info: Assert') -eq 0 ]"
 done
 check "crown: 10 screenshots" "[ \$(shots crown) -eq 10 ]"
@@ -95,11 +102,20 @@ check "rotate: 8 screenshots" "[ \$(shots rotate) -eq 8 ]"
 check "bt: page timeout from the controller" "[ \$(n bt 'CT:page end:link=1, status=4') -gt 0 ]"
 corr=$(python3 scripts/check-audio.py "$out/record" "$ta/wake-xiaolei.wav" 2>&1 | sed -n 's/.*correlation with [^:]*: \([0-9.]*\).*/\1/p' | tail -1)
 check "record: correlation ${corr:-none} >= 0.85" "python3 -c 'import sys; sys.exit(0 if float(\"${corr:-0}\") >= 0.85 else 1)'"
+python3 scripts/check-audio.py "$out/recordnoisy" > /dev/null 2>&1
+# Noise suppression ("up" stand-in): speech recorded in 5 dB pink noise + hum, compared with the clean speech
+# (raw microphone: about 0.75; with the suppressor about 0.88).
+check "recordnoisy: noise suppressed (correlation with clean speech >= 0.82)" "python3 scripts/check-ns.py '$out/recordnoisy' '$ta/wake-xiaolei.wav' 0.82"
 check "speaker: tone captured" "python3 scripts/check-audio.py '$out/speaker' 2>&1 | grep -q 'peak 32768'"
 check "wake: 小雷小雷 confirmed" "[ \$(n wake 'wake word confirmed') -gt 0 ]"
 check "headup: neck monitor sent head up while screen off" "[ \$(n headup 'Sent head up event') -gt 0 ]"
 check "headup: screen turned on by head-up" "[ \$(n headup 'screen on by headup=1') -gt 0 ]"
 check "wake-negative: no wake" "[ \$(n wakeneg 'wake word confirmed') -eq 0 ]"
+check "wake (Meijia voice): confirmed" "[ \$(n wakemeijia 'wake word confirmed') -gt 0 ]"
+check "wake (Reed voice, 10 dB noise): confirmed" "[ \$(n wakereed 'wake word confirmed') -gt 0 ]"
+check "wake (5 dB noise): confirmed" "[ \$(n wakenoisy 'wake word confirmed') -gt 0 ]"
+check "wake-negative (小雷 once, 小美小美, 下雷雨了, 笑累了): no wake" "[ \$(n wakeneg2 'wake word confirmed') -eq 0 ]"
+check "wake-negative (noise only): no wake" "[ \$(n wakenoise 'wake word confirmed') -eq 0 ]"
 for r in weather subtitle notification assistant btrecord settings todo prompter ota; do
     check "$r: rnlink auth" "[ \$(n $r 'auth success') -gt 0 ]"
 done

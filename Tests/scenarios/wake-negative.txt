@@ -8,5 +8,5 @@ emulation RunFor "0.15"
 gpio0 Pulse 1 false 120
 emulation RunFor "10"
 hifi4 MicRestart
-emulation RunFor "14"
+emulation RunFor "18"
 lcdc SaveFrame @OUT/shot-wake.pgm
