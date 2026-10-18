@@ -72,7 +72,10 @@ if 0 < n < 4096:
 '''
 lines += [
     'mach create "RayNeo"',
-    f'machine LoadPlatformDescription {at(root / "platform/best1700.repl")}',
+    # PROBE=1 loads a variant platform with the btcRam LC/page-scan env window carved out as a
+    # logging peripheral (BES1700_ProbeMemory); normal runs use the fast all-MappedMemory platform.
+    f'machine LoadPlatformDescription {at(root / ("platform/best1700-probe.repl" if __import__("os").environ.get("PROBE") else "platform/best1700.repl"))}',
+] + [
     f'sysbus LoadBinary {at(out / "flash/flash0.bin")} 0x10000000',
     f'sysbus LoadBinary {at(out / "flash/flash1.bin")} 0x28000000',
     f'lcdc FrameImagePath "{out}/frame.pgm"',

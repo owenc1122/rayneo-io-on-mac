@@ -1,0 +1,7 @@
+# Classic-BT weather: boot period (RunFor $secs) pages at window 60, pairs via SSP, opens SPP ch26,
+# rnlink-over-SPP pushes weather. Then wake the screen and capture while still connected.
+gpio0 Pulse 1 false 120
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-weather.pgm
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-weather2.pgm

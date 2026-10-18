@@ -1,0 +1,4 @@
+# Hook the BTC page-scan frame callback to log the frame-status (r2=param_3) + caller (LR=the ISR
+# dispatch) on each scan frame, to reverse how a received page maps to param_3==4.
+btc AddHook 0x60420874 "print('[AP:out] PSCANCBK r2=%d r0=0x%x lr=0x%x' % (self.GetRegister(2).RawValue, self.GetRegister(0).RawValue, self.GetRegister(14).RawValue))"
+emulation RunFor "15"

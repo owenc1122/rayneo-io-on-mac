@@ -14,6 +14,7 @@ GATT database, and answers the glasses' own GATT client requests with "attribute
 import argparse, os, socket, struct, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rnlink
+import bredr
 
 LL_VERSION_IND, LL_UNKNOWN_RSP, LL_FEATURE_REQ, LL_FEATURE_RSP = 0x0c, 0x07, 0x08, 0x09
 LL_PERIPHERAL_FEATURE_REQ, LL_REJECT_EXT_IND, LL_LENGTH_REQ, LL_LENGTH_RSP = 0x0e, 0x11, 0x14, 0x15
@@ -47,7 +48,6 @@ class Central:
         self.rn_pending = []            # rnlink GATT reassembly: list of incomplete frames (glasses -> phone)
         self.rn = None                  # RnlinkPhone, attached by main()
         self.log_raw = False            # dump raw notify chunks (debug)
-        self.classic_log_n = 0          # classic-BT (BR/EDR) air bridge: cap logging
         self.glasses_addr = b''
 
     def say(self, *a):
@@ -55,7 +55,7 @@ class Central:
 
     # ---- advertising -------------------------------------------------------------------------
     def on_adv(self, cs, fmt, adva, pdus):
-        if self.connected_cs is not None:
+        if self.connected_cs is not None or os.environ.get('BLE_OFF'):
             return 'NONE'
         for p in pdus:
             hdr, data = p.split(':')
@@ -331,6 +331,37 @@ class Central:
         self.pending_att = True
 
 
+class SppLink:
+    """rnlink over the classic SPP channel (Android phones): a byte stream of aa55 frames."""
+    def __init__(self, c, phone):
+        self.c, self.phone, self.buf = c, phone, b''
+        self.glasses_addr = c.glasses_addr if getattr(c, 'glasses_addr', None) else bytes.fromhex('554433221100')
+        self.rn = rnlink.RnlinkPhone(c.say, phone.spp_write, self)
+        c.say('rnlink over SPP: starting handshake')
+        self.rn.start()
+
+    def on_data(self, data):
+        self.buf += data
+        while len(self.buf) >= 6:
+            i = self.buf.find(b'\xaa\x55')
+            if i < 0:
+                self.buf = b''; return
+            self.buf = self.buf[i:]
+            total = ((self.buf[2] << 8) | self.buf[3]) + 6
+            if len(self.buf) < total:
+                return
+            frame, self.buf = self.buf[:total], self.buf[total:]
+            self.rn.on_frame(frame)
+
+
+def spp_attach(c):
+    def opened(phone):
+        c.spp = SppLink(c, phone)
+        phone.on_spp_data = c.spp.on_data
+        phone.on_tick = c.spp.rn.on_tick
+    c.bredr.on_spp_open = opened
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--port', type=int, default=23600)
@@ -344,12 +375,14 @@ def main():
     srv.listen(1)
     c = Central(log)
     c.rn = rnlink.RnlinkPhone(c.say, c.rnlink_send, c)
+    c.bredr = bredr.ClassicPhone(c.say); spp_attach(c)
     c.say('waiting for the emulator on port %d' % a.port)
     # Re-accept across reconnects: a dropped model connection (or a stray probe) must not kill us.
     while True:
         conn, _ = srv.accept()
         f = conn.makefile('rw', newline='\n')
         c.__init__(log); c.rn = rnlink.RnlinkPhone(c.say, c.rnlink_send, c)   # fresh per model session
+        c.bredr = bredr.ClassicPhone(c.say); spp_attach(c)
         c.log_raw = a.raw
         c.say('emulator connected')
         for line in f:
@@ -369,14 +402,9 @@ def main():
                     hdr, data = p.split(':')
                     c.on_glasses_pdu(int(hdr, 16), bytes.fromhex(data))
                 reply = 'OK'
-            elif w[0] in ('PSCAN', 'ISCAN') or w[0].startswith('CL'):
-                # Classic BT (BR/EDR) air bridge (WIP): the glasses are page/inquiry scanning. Log the
-                # activity (cs, our BD_ADDR, control words, any queued TX) so the inline classic
-                # descriptor + packet format can be mapped. No page offered yet -> NONE.
-                if c.classic_log_n < 30:
-                    c.say('CLASSIC %s' % line.rstrip())
-                    c.classic_log_n += 1
-                reply = 'NONE'
+            elif w[0] in ('PSCAN', 'ISCAN', 'SLAVE', 'CTX') or w[0].startswith('CL'):
+                # Classic BT (BR/EDR): the phone side of the baseband (scripts/bredr.py).
+                reply = c.bredr.on_activity(w)
             else:
                 reply = 'NONE'
             try:
