@@ -437,35 +437,42 @@ class RnlinkPhone:
                 'utc': int(_t.time()), 'offset': off, 'timezone': 'Asia/Shanghai'}})
             self.say('rnlink -> sync_time reply %s' % payload_json)
             self.tx(0x0f, pb_msg(typ or 6, message=payload_json))
-        if 'current_weather_request' in text or 'current_weather' in text:
+        # Only an explicit request gets a weather push. The glasses answer every push with an ack
+        # {"cmd":"current_weather_update","payload":{"value":0}} (type 19); answering that ack with
+        # another push was an endless ping-pong (~1000 round trips per scenario) that floods the AP
+        # until its analytics uploader races ("pack size mismatch", heap assert in rayneo_analyticslog).
+        if 'current_weather_request' in text:
             self.push_weather()
-            # Re-send the assistant answer a few times (spaced by connection events) so it lands after
-            # the glasses have fully entered ProcessingState, even on a fast emulator.
-            if getattr(self, 'assist_resend', 0) > 0:
-                self.assist_resend -= 1
-                self.send_assist_answer()
-            # A few more notifications (new UIDs, so they are not de-duplicated), spaced like a real
-            # phone's. Event-driven, NOT wall-clock, so a banner is on screen when a frame is captured
-            # regardless of emulator speed. Capped: an endless flood (dozens in 30 s, which no phone
-            # sends) overflows the stock firmware's analytics bulk upload (RnLinkMsgProcessor "pack
-            # size mismatch", then a heap assert in rayneo_analyticslog).
-            if getattr(self, 'notif_demo', False):
-                self.notif_tick = getattr(self, 'notif_tick', 0) + 1
-                if self.notif_tick % 6 == 0 and getattr(self, 'notif_uid', 1) < 6:
-                    self.notif_uid = getattr(self, 'notif_uid', 1) + 1
-                    self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',
-                                           app='WhatsApp', uid=str(self.notif_uid), ntype=1)
-            # Piggyback the caption stream on this frequent tick so it stays on-screen.
-            if getattr(self, 'caption_lines', None):
-                # Advance to the next distinct line every ~8 weather ticks (a few seconds apart);
-                # push each line once so the caption reads cleanly instead of accumulating repeats.
-                self.caption_tick += 1
-                if self.caption_tick % 8 == 0:
-                    if self.caption_idx < len(self.caption_lines) - 1:
-                        self.caption_idx += 1
-                    self.caption_seq += 1
-                    self.push_caption(*self.caption_lines[self.caption_idx],
-                                      seq=self.caption_seq, mode=2, status=1)
+
+    def on_tick(self):
+        """Periodic phone-side work, called by the BLE central every few connection events (virtual
+        time, independent of host speed); a no-op until the rnlink link is authenticated."""
+        if not self.authed:
+            return
+        # Re-send the assistant answer a few times (spaced in time) so it lands after the glasses
+        # have fully entered ProcessingState, even on a fast emulator.
+        if getattr(self, 'assist_resend', 0) > 0:
+            self.assist_resend -= 1
+            self.send_assist_answer()
+        # A few more notifications (new UIDs, so they are not de-duplicated), spaced like a real
+        # phone's, so a banner is on screen when a frame is captured.
+        if getattr(self, 'notif_demo', False):
+            self.notif_tick = getattr(self, 'notif_tick', 0) + 1
+            if self.notif_tick % 6 == 0 and getattr(self, 'notif_uid', 1) < 6:
+                self.notif_uid = getattr(self, 'notif_uid', 1) + 1
+                self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',
+                                       app='WhatsApp', uid=str(self.notif_uid), ntype=1)
+        # Caption stream: keeps a line on screen.
+        if getattr(self, 'caption_lines', None):
+            # Advance to the next distinct line every 8 ticks (a few seconds apart);
+            # push each line once so the caption reads cleanly instead of accumulating repeats.
+            self.caption_tick += 1
+            if self.caption_tick % 8 == 0:
+                if self.caption_idx < len(self.caption_lines) - 1:
+                    self.caption_idx += 1
+                self.caption_seq += 1
+                self.push_caption(*self.caption_lines[self.caption_idx],
+                                  seq=self.caption_seq, mode=2, status=1)
 
     # ---- phone-driven features ----
     # ---- Prompter / teleprompter, business 0x14 (PROMPTER) ----

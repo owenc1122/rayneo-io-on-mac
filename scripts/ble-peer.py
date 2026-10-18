@@ -25,6 +25,7 @@ LL_NAMES = {0x00: 'CONNECTION_UPDATE_IND', 0x01: 'CHANNEL_MAP_IND', 0x02: 'TERMI
             0x19: 'MIN_USED_CHANNELS_IND'}
 CENTRAL_ADDR = bytes.fromhex('0100eeffc0c0')        # random static C0:C0:FF:EE:00:01 (LSB first)
 IBEACON = bytes.fromhex('4c000215')
+TICK_EVENTS = 16                    # phone-side periodic work (RnlinkPhone.on_tick) every N connection events
 
 
 class Central:
@@ -80,6 +81,8 @@ class Central:
     # ---- connection events -------------------------------------------------------------------
     def next_pdu(self):
         self.events += 1
+        if self.events % TICK_EVENTS == 0 and getattr(self, 'rn', None):
+            self.rn.on_tick()
         if not self.queue and self.gatt_step:
             self.gatt_next()
         if self.queue:
@@ -121,9 +124,10 @@ class Central:
         # Data Length Extension: once the glasses state their MaxRxOctets (LENGTH_REQ/RSP), send data
         # PDUs up to min(that, 251) instead of 27 (10x fewer connection events per ATT write; large
         # rnlink frames such as OTA slices otherwise outlast the glasses' 20 s peer-reply timeout).
+        # BLE_MAX_PDU=27 caps it (A/B against the pre-DLE behaviour).
         if len(payload) >= 9:
             rx_octets = struct.unpack_from('<H', payload, 1)[0]
-            self.max_pdu = max(27, min(251, rx_octets))
+            self.max_pdu = max(27, min(251, rx_octets, int(os.environ.get('BLE_MAX_PDU', 251))))
             self.say('data length: max PDU %d' % self.max_pdu)
 
     def l2cap_check(self):
