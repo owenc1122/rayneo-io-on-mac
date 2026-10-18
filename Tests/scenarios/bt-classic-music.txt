@@ -1,0 +1,21 @@
+# Classic + navigate the launcher looking for the music app (OnlineMusicController): launching it takes
+# media audio focus so the glasses open A2DP out to the phone (our ACP A2dpSource streams). Map the
+# app list across crown rotations; A2DP_MUSIC arms the phone's ACP source.
+gpio0 Pulse 1 false 120
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-m0.pgm
+gpio0 Pulse 1 false 120
+emulation RunFor "3"
+lcdc SaveFrame @OUT/shot-m1.pgm
+i2c0.ots Rotate 400
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-m2.pgm
+i2c0.ots Rotate 400
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-m3.pgm
+i2c0.ots Rotate 400
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-m4.pgm
+i2c0.ots Rotate 400
+emulation RunFor "2"
+lcdc SaveFrame @OUT/shot-m5.pgm

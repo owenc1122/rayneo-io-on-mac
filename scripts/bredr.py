@@ -154,6 +154,32 @@ def sdp_attr_ranges(seqval):                                # requested attribut
     return rs or [(0, 0xffff)]
 
 
+def a2dp_source_record():
+    """A2DP Audio Source service record (AVDTP on L2CAP PSM 0x0019)."""
+    return [
+        (0x0000, de_uint(0x00010002, 4)),
+        (0x0001, de_seq([de_uuid16(0x110A)])),                              # AudioSource
+        (0x0004, de_seq([de_seq([de_uuid16(0x0100), de_uint(0x0019, 2)]),   # L2CAP, PSM 0x0019
+                         de_seq([de_uuid16(0x0019), de_uint(0x0103, 2)])])),  # AVDTP v1.3
+        (0x0005, de_seq([de_uuid16(0x1002)])),                              # PublicBrowseRoot
+        (0x0009, de_seq([de_seq([de_uuid16(0x110D), de_uint(0x0103, 2)])])),  # A2DP v1.3
+        (0x0311, de_uint(0x0001, 2)),                                       # supported features
+    ]
+
+
+def avrcp_target_record():
+    """AVRCP Target service record (AVCTP on L2CAP PSM 0x0017)."""
+    return [
+        (0x0000, de_uint(0x00010003, 4)),
+        (0x0001, de_seq([de_uuid16(0x110C)])),                              # AV_RemoteControlTarget
+        (0x0004, de_seq([de_seq([de_uuid16(0x0100), de_uint(0x0017, 2)]),   # L2CAP, PSM 0x0017 (AVCTP)
+                         de_seq([de_uuid16(0x0017), de_uint(0x0104, 2)])])),  # AVCTP v1.4
+        (0x0005, de_seq([de_uuid16(0x1002)])),
+        (0x0009, de_seq([de_seq([de_uuid16(0x110E), de_uint(0x0106, 2)])])),  # AVRCP v1.6
+        (0x0311, de_uint(0x00b2, 2)),                                       # category 1+2, player/settings
+    ]
+
+
 def hfp_ag_record(channel, features=0x0023):
     """HFP Audio Gateway service record (attr id -> element). features: SDP supported-features
     bitmap (bit0 three-way, bit1 EC/NR, bit5 wide-band speech)."""
@@ -217,6 +243,7 @@ class ClassicPhone:
         self.on_spp_data = None         # callback(bytes) for data from the glasses on SPP
         self.on_tick = None             # periodic phone-side work while connected
         self.served = {0x0001: self.on_sdp_server}   # PSMs the phone answers (glasses-initiated)
+        self.served_open = {}           # PSM -> on_open(scid) for accepted incoming channels
         self._out_cid = 0x0040          # monotonic CID allocator for outgoing (phone-initiated) channels
         self._in_cid = 0x0080           # local CID allocator for incoming (glasses-initiated) channels
         self.dlcs = {}                  # RFCOMM DLCI -> per-DLC state (shared mux, several channels)
@@ -225,6 +252,8 @@ class ClassicPhone:
         self.spp_dlci = None            # rnlink SPP DLC (channel 26)
         self.hfp = None                 # HFP Audio Gateway, bound once its DLC (glasses HF channel) opens
         self.on_hf_channel = None       # callback(channel) once the glasses' HF RFCOMM channel is known
+        self.a2dp = None                # A2DP source (AVDTP, L2CAP PSM 0x19)
+        self.avrcp = None               # AVRCP target (AVCTP, L2CAP PSM 0x17)
 
     # ---- air interface -------------------------------------------------------------------------
     def on_activity(self, w):
@@ -265,6 +294,8 @@ class ClassicPhone:
                         self.hfp.incoming_call('+15550123')
                     elif self.hfp.ind.get('callsetup'):         # keep ringing until answered/screenshot
                         self.hfp.ring()
+                if self.a2dp and self.a2dp.state == 'streaming' and self.connected_events % 3 == 0:
+                    self.a2dp.stream(40)                        # pump ~40 ms of SBC media per few events
                 if self.txq:
                     t, llid, payload = self.txq.pop(0)
                     return 'RX %x %x %x %s' % (t, self.lt_addr, llid, payload.hex())
@@ -576,8 +607,9 @@ class ClassicPhone:
                          % (psm, rcid, '' if srv else ' - refused'))
                 if srv:
                     mycid = self._in_cid; self._in_cid += 1
+                    opener = self.served_open.get(psm, (lambda s: None))
                     self.channels[mycid] = dict(psm=psm, dcid=rcid, open=False, conf_in=False,
-                        conf_out=False, on_open=(lambda s: None),
+                        conf_out=False, on_open=(lambda s, o=opener: o(s)),
                         handler=(lambda pdu, s=mycid, fn=srv: fn(s, pdu)))
                     self.send_l2cap(1, struct.pack('<BBHHHHH', 0x03, ident, 8, mycid, rcid, 0, 0))
                     self.signal(0x04, struct.pack('<HH', rcid, 0) + bytes([0x01, 2]) + struct.pack('<H', 1021))
@@ -655,6 +687,40 @@ class ClassicPhone:
         # call is raised from on_activity once hfp.slc is set.
         self.say('HFP AG RFCOMM DLC up (DLCI %d); waiting for HF service-level connection' % dlci)
 
+    # ---- A2DP source + AVRCP target (the phone streams music to the glasses' A2DP sink) -----------
+    def start_a2dp(self):
+        # The glasses are the A2DP SINK + AVRCP CONTROLLER and run no server on PSM 0x19/0x17 (they
+        # return "PSM not supported" to an incoming connect): they INITIATE, audio-focus-driven, when
+        # media starts on the glasses. So the phone is the ACP source + AVRCP target: we listen on
+        # PSM 0x19 (AVDTP: first channel = signaling, second = media) and 0x17 (AVCTP) and respond.
+        from btprofiles import avdtp, avrcp
+        wav = os.environ.get('A2DP_WAV', '.local/test-audio/wake-xiaolei.wav')
+        self.a2dp_sig_cid = self.a2dp_media_cid = self.avrcp_cid = None
+        self.a2dp = avdtp.A2dpSource(
+            send=lambda b: self.send_chan(self.a2dp_sig_cid, b),
+            send_media=lambda b: (self.send_chan(self.a2dp_media_cid, b) if self.a2dp_media_cid else None),
+            open_transport=None, audio=avdtp.WavSource(wav), say=self.say)
+        self.avrcp = avrcp.AvrcpTarget(send=lambda b: self.send_chan(self.avrcp_cid, b), say=self.say,
+                                       title='Virtual Track', artist='Virtual Artist')
+        self.served[0x0019] = lambda scid, pdu: self.a2dp.on_data(pdu)
+        self.served[0x0017] = lambda scid, pdu: self.avrcp.on_data(pdu)
+        self.served_open[0x0019] = self._a2dp_chan_open
+        self.served_open[0x0017] = self._avctp_open
+        self.say('A2DP source + AVRCP target ready (ACP); waiting for the glasses to open media')
+
+    def _a2dp_chan_open(self, scid):
+        if self.a2dp_sig_cid is None:
+            self.a2dp_sig_cid = scid
+            self.say('A2DP AVDTP signaling channel open (the glasses will discover our source SEP)')
+        else:
+            self.a2dp_media_cid = scid
+            self.a2dp.transport_up = True
+            self.say('A2DP media transport channel open; ready to stream SBC')
+
+    def _avctp_open(self, scid):
+        self.avrcp_cid = scid
+        self.say('AVRCP AVCTP channel open')
+
     # ---- SDP server: the glasses (HF/sink) query the phone for its HFP AG / A2DP / AVRCP services --
     def on_sdp_server(self, scid, pdu):
         if not pdu or pdu[0] not in (0x02, 0x04, 0x06):
@@ -670,6 +736,10 @@ class ClassicPhone:
             records = []
             if {0x111F, 0x111E, 0x1203} & set(uuids):           # HFP AG asked for
                 records.append(hfp_ag_record(HFP_AG_CHANNEL))
+            if {0x110A, 0x110D} & set(uuids):                   # A2DP (glasses query 0x110d)
+                records.append(a2dp_source_record())
+            if {0x110C, 0x110E} & set(uuids):                   # AVRCP (glasses query 0x110e)
+                records.append(avrcp_target_record())
             lists = []
             for rec in records:
                 items = [de_uint(aid, 2) + val for aid, val in rec
@@ -679,7 +749,11 @@ class ClassicPhone:
             body = struct.pack('>H', len(attrlists)) + attrlists + b'\x00'
             self.send_chan(scid, bytes([0x07]) + struct.pack('>HH', tid, len(body)) + body)
             if records:
-                self.say('SDP-server -> HFP AG record (RFCOMM channel %d)' % HFP_AG_CHANNEL)
+                served = []
+                if {0x111F, 0x111E, 0x1203} & set(uuids): served.append('HFP AG (ch %d)' % HFP_AG_CHANNEL)
+                if {0x110A, 0x110D} & set(uuids): served.append('A2DP source (PSM 0x19)')
+                if {0x110C, 0x110E} & set(uuids): served.append('AVRCP target (PSM 0x17)')
+                self.say('SDP-server -> %s' % ', '.join(served))
         else:                                                   # 0x02/0x04: minimal empty answer
             rid = 0x03 if pid == 0x02 else 0x05
             body = (struct.pack('>HH', 0, 0) + b'\x00') if pid == 0x02 else (struct.pack('>H', 1) + de_seq([]) + b'\x00')
@@ -833,6 +907,8 @@ class ClassicPhone:
             self.on_spp_open(self)
         if os.environ.get('HFP_CALL'):                          # bring up the HFP AG for the call demo
             self.start_hfp()
+        if os.environ.get('A2DP_MUSIC'):                        # stream music to the glasses' A2DP sink
+            self.start_a2dp()
 
     def _spp_recv(self, data):
         if self.on_spp_data:
