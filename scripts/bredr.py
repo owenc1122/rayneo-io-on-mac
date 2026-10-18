@@ -254,6 +254,9 @@ class ClassicPhone:
         self.on_hf_channel = None       # callback(channel) once the glasses' HF RFCOMM channel is known
         self.a2dp = None                # A2DP source (AVDTP, L2CAP PSM 0x19)
         self.avrcp = None               # AVRCP target (AVCTP, L2CAP PSM 0x17)
+        self.sco_codec = 2              # HFP (e)SCO: 2 = mSBC (wide band), 1 = CVSD
+        self.sco_len = 60               # SCO frame bytes per 7.5 ms
+        self.sco_active = False         # (e)SCO link established
 
     # ---- air interface -------------------------------------------------------------------------
     def on_activity(self, w):
@@ -459,6 +462,19 @@ class ClassicPhone:
             self.send_lmp('ping_res', b'', tid)
         elif name == 'channel_classification_req':
             pass
+        elif name == 'accepted_ext' and len(p) >= 2 and p[1] == LMP_EXT['esco_link_req']:
+            self.say('LMP eSCO link accepted by the glasses')
+            self._sco_up()
+        elif name == 'not_accepted_ext' and len(p) >= 2 and p[1] == LMP_EXT['esco_link_req']:
+            self.say('LMP eSCO link req NOT accepted (reason 0x%02x)' % (p[2] if len(p) > 2 else 0))
+        elif name == 'esco_link_req':
+            # The glasses accept by echoing / counter-propose their own eSCO params; take their M->S
+            # packet length and accept.
+            if len(p) >= 10:
+                self.sco_len = struct.unpack_from('<H', p, 8)[0] or self.sco_len
+            self.say('LMP <- eSCO link req from the glasses (len %d); accepting' % self.sco_len)
+            self.send_lmp('accepted_ext', bytes([127, LMP_EXT['esco_link_req']]), tid)
+            self._sco_up()
         elif name == 'not_accepted' and p and p[0] == LMP['DHkey_check']:
             self.say('SSP DHkey check rejected by the glasses')
         elif name in ('accepted', 'not_accepted', 'accepted_ext', 'not_accepted_ext', 'auto_rate',
@@ -691,12 +707,25 @@ class ClassicPhone:
         self.say('HFP AG RFCOMM DLC up (DLCI %d); waiting for HF service-level connection' % dlci)
 
     def _sco_audio(self, codec):
-        # hfp.py negotiated the codec (+BCS); now the (e)SCO link carries the voice. CVSD = narrow
-        # band (8 kHz), mSBC = wide band (16 kHz). The audio frames (60 B CVSD / 57 B mSBC per 7.5 ms)
-        # travel over the SCO link to the glasses' ScoService via intersys ch3 (controller bridge).
+        # hfp.py negotiated the codec (+BCS); the phone (AG) now sets up the (e)SCO link as master.
+        # HFP T2 for mSBC (2-EV3, transparent air mode, 60 B, T_eSCO=12) / EV3 for CVSD (air 2). The
+        # downlink audio (60 B mSBC / 60 B CVSD per 7.5 ms) then rides the SCO link to the glasses'
+        # ScoService via intersys ch3 (controller bridge, pumped from on_activity once sco_active).
         self.sco_codec = codec
-        self.say('HFP audio up: codec %s -> establishing (e)SCO link' % ('mSBC' if codec == 2 else 'CVSD'))
-        self.sco_pending = True                 # observed first: see whether the glasses LMP (e)SCO req
+        air = 3 if codec == 2 else 2            # transparent (mSBC) / CVSD
+        pkt = 0x26 if codec == 2 else 0x07      # 2-EV3 (T2) / EV3
+        self.sco_len = 60
+        payload = (bytes([1, self.lt_addr, 0, 0, 12, 6, pkt, pkt])
+                   + struct.pack('<HH', self.sco_len, self.sco_len) + bytes([air, 0]))
+        self.say('HFP audio up: codec %s -> LMP eSCO link req (air %d, pkt 0x%02x, len %d)'
+                 % ('mSBC' if codec == 2 else 'CVSD', air, pkt, self.sco_len))
+        self.send_lmp('esco_link_req', payload)
+
+    def _sco_up(self):
+        if not getattr(self, 'sco_active', False):
+            self.sco_active = True
+            self.say('(e)SCO link established (codec %s, %d B/frame); SCO audio active'
+                     % ('mSBC' if self.sco_codec == 2 else 'CVSD', self.sco_len))
 
     # ---- A2DP source + AVRCP target (the phone streams music to the glasses' A2DP sink) -----------
     def start_a2dp(self):
