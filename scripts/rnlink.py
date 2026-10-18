@@ -240,6 +240,8 @@ class RnlinkPhone:
         self.rand = bytes.fromhex('a5b4c3d2')
         self.glasses_dev_addr = b''
         self.ft = FileSender(self)
+        self.ota_dir = os.environ.get('OTA_DIR')          # OTA "files" set to offer (OtaFileInfo.json)
+        self.ota_files = [n for n in os.environ.get('OTA_FILES', '').split(',') if n]  # subset; empty = all
 
     # ---- outbound ----
     def tx(self, business, payload, ctrl=0):
@@ -296,6 +298,8 @@ class RnlinkPhone:
             self.on_prompter(payload)
         elif business == FT_BUSINESS:
             self.ft.on_message(payload)
+        elif business == 0x09:
+            self.on_ota(payload)
         elif business in (0x0f, 0x0e, 0x0c, 0x18):
             self.on_feature(business, payload)
 
@@ -579,6 +583,69 @@ class RnlinkPhone:
         self.say('rnlink PROMPTER -> remote-start (action=2) %s' % did)
         self.tx(0x14, pb_msg(3, message=json.dumps(msg)), ctrl=self._pctrl())
 
+    # ---- OTA, business 0x09 (FOTA_MODULE; OtaTransferRnLinkMsgProcessor) ----
+    # PbMsg{type, message=JSON[, data]}. The phone starts the session, then the glasses drive it with
+    # requests the phone answers with the same type (OtaTransferRnLinkMsgProcessor::receiveMessage):
+    #   1 GetGlassOsVersion, 2 BatteryLevel, 3 HasEnoughNandFlash {OtaSize}, 0xb IsIdle  (phone prechecks)
+    #   4 StartGlassTransferPage {Mode:1..4}       phone -> glasses: launches com.rayneo.liteos.ota
+    #   5 glasses asks the package version  -> phone {OtaVersion}
+    #   6 glasses asks the package info {OtaVersion} -> phone: legacy "files" mode = the OtaFileInfo.json
+    #     array [{Name,Size,Md5,BurnMode,BurnAddr,BurnPath}] (or {PackageInfoVersion,PackageType:"zip",Files})
+    #   7 glasses requests a slice {Name,Start,Size} (Size <= 0xc800) -> phone echoes the JSON with the
+    #     slice bytes in PbMsg.data (len must equal Size). Each finished file is MD5-checked
+    #     ("file %s MD5 OK"); after the last: "FILES all files verified" and type 9 GOTO_INSTALL ->
+    #     reboot into the installer.
+    # Slices go inline in PbMsg.data; the business-0x11 file transfer is not used by OTA.
+    def ota_package(self):
+        import json
+        files = json.load(open(os.path.join(self.ota_dir, 'OtaFileInfo.json')))
+        if self.ota_files:
+            files = [f for f in files if f['Name'] in self.ota_files]
+        return files
+
+    def ota_version(self):
+        import json
+        try:
+            return json.load(open(os.path.join(self.ota_dir, 'baseline.json')))['versionLabel']
+        except Exception:
+            return '1.0.4.12'
+
+    def start_ota(self):
+        import json
+        size = sum(f['Size'] for f in self.ota_package())
+        self.say('rnlink OTA -> prechecks + start transfer page (%d files, %d bytes)' % (
+            len(self.ota_package()), size))
+        self.tx(0x09, pb_msg(1, message='{}'))
+        self.tx(0x09, pb_msg(2, message='{}'))
+        self.tx(0x09, pb_msg(3, message=json.dumps({'OtaSize': size})))
+        self.tx(0x09, pb_msg(0xb, message='{}'))
+        self.tx(0x09, pb_msg(4, message=json.dumps({'Mode': 1})))
+
+    def on_ota(self, payload):
+        import json
+        pb = pb_decode(payload); typ = pb.get(2); raw = pb.get(3, b'')
+        try:
+            msg = json.loads(raw.decode()) if raw else {}
+        except Exception:
+            msg = {'raw': raw[:80]}
+        self.say('rnlink OTA <- type=%s %s' % (typ, msg))
+        if not self.ota_dir:
+            return
+        if typ == 5:
+            self.tx(0x09, pb_msg(5, message=json.dumps({'OtaVersion': self.ota_version()})))
+        elif typ == 6:
+            pkg = self.ota_package()
+            self.say('rnlink OTA -> package info: %s' % [f['Name'] for f in pkg])
+            self.tx(0x09, pb_msg(6, message=json.dumps(pkg)))
+        elif typ == 7:
+            name, start, size = msg.get('Name'), int(msg.get('Start', 0)), int(msg.get('Size', 0))
+            with open(os.path.join(self.ota_dir, os.path.basename(name)), 'rb') as f:
+                f.seek(start); data = f.read(size)
+            self.ota_sent = getattr(self, 'ota_sent', 0) + len(data)
+            self.say('rnlink OTA -> slice %s @%d +%d' % (name, start, len(data)))
+            self.tx(0x09, pb_msg(7, message=json.dumps({'Name': name, 'Start': start, 'Size': len(data)}),
+                                 data=data), ctrl=self._pctrl())
+
     def push_todo(self, events=None):
         import json, time as _t
         # TodoLink (business 0x16) is a PbMsg: type 2 = single add/modify (single_upsert), message = JSON
@@ -662,6 +729,8 @@ class RnlinkPhone:
                     import json as _j
                     for t in range(1, 40):
                         self.tx(0x14, pb_msg(t, message=_j.dumps({'probe': t})))
+                if self.ota_dir:
+                    self.start_ota()
                 if getattr(self, 'notif_demo', False):
                     # Notification channel = business 0x15; "type" 1 = add/display (2 remove, 3 update).
                     self.push_notification(0x15, 'Alice', 'Hello from the virtual phone!',

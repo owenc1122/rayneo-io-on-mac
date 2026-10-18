@@ -64,6 +64,7 @@ phone btrecord 25 bt-record.txt RECORD_DEMO=1
 phone settings 30 bt-settings.txt SETTINGS_DEMO=1
 phone todo 30 bt-todo.txt TODO_DEMO=1
 phone prompter 48 bt-prompter.txt PROMPT_DEMO=1
+phone ota 60 bt-ota.txt OTA_DIR="$fw" OTA_FILES=smf.json
 for p in $jobs_pids; do wait "$p"; done
 kill $peer_pids 2>/dev/null
 fi
@@ -72,7 +73,7 @@ fail=0
 check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fail=1; fi; }
 n() { c=$(grep -ac "$2" "$out/$1/boot.log" 2>/dev/null); echo "${c:-0}"; }
 shots() { ls "$out/$1" 2>/dev/null | grep -c '^shot-'; }
-for r in crown rotate bt record speaker wake wakeneg headup weather subtitle notification assistant btrecord settings todo prompter; do
+for r in crown rotate bt record speaker wake wakeneg headup weather subtitle notification assistant btrecord settings todo prompter ota; do
     check "$r: no firmware assert" "[ \$(n $r 'dump_assert_info: Assert') -eq 0 ]"
 done
 check "crown: 10 screenshots" "[ \$(shots crown) -eq 10 ]"
@@ -85,7 +86,7 @@ check "wake: 小雷小雷 confirmed" "[ \$(n wake 'wake word confirmed') -gt 0 ]
 check "headup: neck monitor sent head up while screen off" "[ \$(n headup 'Sent head up event') -gt 0 ]"
 check "headup: screen turned on by head-up" "[ \$(n headup 'screen on by headup=1') -gt 0 ]"
 check "wake-negative: no wake" "[ \$(n wakeneg 'wake word confirmed') -eq 0 ]"
-for r in weather subtitle notification assistant btrecord settings todo prompter; do
+for r in weather subtitle notification assistant btrecord settings todo prompter ota; do
     check "$r: rnlink auth" "[ \$(n $r 'auth success') -gt 0 ]"
 done
 # On-screen checks: a firmware log line that only appears once the phone-driven content is rendered.
@@ -103,5 +104,7 @@ check "filetransfer: glasses verified the file and sent FileRecvState SUCCESS" "
 check "prompter: pushed script delivered to the prompter (file info created)" "[ \$(n prompter 'notifyFileRecv - file info created successfully') -gt 0 ]"
 check "prompter: remote start runs the prompter (state=1, auto scroll)" "[ \$(n prompter 'state=1, pageOffset=0, highLightOffset=0, elapsedSeconds=0, countdown=0, scroll=2') -gt 0 ]"
 check "prompter: text moves on screen (reading highlight/scroll between shots)" "python3 scripts/check-frames.py '$out/prompter/shot-prompter.pgm' '$out/prompter/shot-prompter3.pgm' 25 > /dev/null"
+check "ota: slice transferred and MD5-verified on the glasses" "[ \$(n ota 'file smf.json MD5 OK') -gt 0 ]"
+check "ota: all files verified, install phase entered" "[ \$(n ota 'FILES all files verified') -gt 0 ] && [ \$(n ota 'GOTO_INSTALL queued') -gt 0 ]"
 echo "results in $out"
 exit $fail

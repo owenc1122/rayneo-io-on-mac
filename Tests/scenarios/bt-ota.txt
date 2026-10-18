@@ -1,0 +1,5 @@
+# Virtual phone runs an OTA (business 0x09, OTA_DIR/OTA_FILES on ble-peer.py): prechecks, start
+# transfer page, then answers the glasses' version / package-info / slice requests from the OTA file
+# set; the glasses write and MD5-verify each file, report all files verified and enter the install
+# phase (GOTO_INSTALL, reboot into recovery). Checks are on boot.log.
+emulation RunFor "60"
