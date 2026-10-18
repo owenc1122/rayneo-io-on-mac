@@ -20,6 +20,18 @@ sh scripts/build-app.sh                 # BUNDLE_RENODE=1 时把 Renode 一起�
 sh scripts/run-app.sh                   # 等同于 Finder 双击
 ```
 
+签名与公证（分发给别人用）：
+
+```sh
+# 本机自用：不设 SIGN_IDENTITY 时做 ad-hoc 签名（同样开启 hardened runtime 与权限），只能在本机运行
+sh scripts/sign-notarize.sh
+# 发布：Developer ID 签名 → notarytool 公证（--wait）→ staple → spctl 检查
+xcrun notarytool store-credentials rayneo-notary --apple-id <Apple ID> --team-id <TEAMID> --password <App 专用密码>   # 一次性
+SIGN_IDENTITY="Developer ID Application: <名字> (<TEAMID>)" NOTARY_PROFILE=rayneo-notary sh scripts/sign-notarize.sh
+```
+
+脚本从内到外逐个签名包内所有 Mach-O（先是打包的 Renode，最后是应用本身），全部开启 hardened runtime。应用的权限：麦克风、本机网络（Renode 监视端口）；Renode 的 .NET 主程序：JIT、未签名可执行内存、关闭库校验（它从临时副本加载模拟器库）。每次重新签名在 macOS 看来都是新应用，第一次启动会重新询问麦克风权限。
+
 虚拟手机（BLE）：
 
 ```sh
