@@ -127,5 +127,6 @@ check "prompter: remote start runs the prompter (state=1, auto scroll)" "[ \$(n 
 check "prompter: text moves on screen (reading highlight/scroll between shots)" "python3 scripts/check-frames.py '$out/prompter/shot-prompter.pgm' '$out/prompter/shot-prompter3.pgm' 25 > /dev/null"
 check "ota: slice transferred and MD5-verified on the glasses" "[ \$(n ota 'file smf.json MD5 OK') -gt 0 ]"
 check "ota: all files verified, install phase entered" "[ \$(n ota 'FILES all files verified') -gt 0 ] && [ \$(n ota 'GOTO_INSTALL queued') -gt 0 ]"
+check "btprofiles: HFP/A2DP(SBC)/AVRCP unit tests" "python3 -m unittest discover -s Tests/btprofiles > /dev/null 2>&1"
 echo "results in $out"
 exit $fail
