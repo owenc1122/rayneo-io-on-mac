@@ -307,11 +307,31 @@ class ClassicPhone:
             self.send_lmp('accepted', bytes([LMP['start_encryption_req']]), tid)
             self.say('link encrypted (radio cipher is a no-op in the model)')
         elif name == 'au_rand':
-            # Legacy mutual auth with the SSP link key: SRES via E1. The radio/BTC computes it on real
-            # hardware; here just acknowledge so the firmware proceeds (SRES is checked by the BTC model side).
-            self.send_lmp('sres', bytes(4), tid)
+            # The glasses challenge us (we are the claimant): SRES = E1(K, their_RAND, our_addr)[:4].
+            import e1 as _e1
+            their_rand_be = bytes(p[:16])[::-1]              # wire LE -> crypto BE
+            sres_be, _aco = _e1.e1(self.link_key, their_rand_be, self.bdaddr[::-1])
+            self.send_lmp('sres', sres_be[::-1], tid)
+            self.say('LMP <- au_rand (glasses challenge); replied sres %s' % sres_be[::-1].hex())
+        elif name == 'sres':
+            # Glasses' response to our au_rand. Compare to our E1 (oracle: log both; link-key/byte-order
+            # don't need to be right for the glasses' value to be captured).
+            import e1 as _e1
+            theirs = bytes(p[:4])
+            mine_be, _aco = _e1.e1(self.link_key, self.au_rand_be, bytes.fromhex('554433221100'))
+            self.say('ORACLE au_sres: glasses=%s mine_be=%s mine_le=%s match=%s' % (
+                theirs.hex(), mine_be.hex(), mine_be[::-1].hex(),
+                theirs in (mine_be, mine_be[::-1])))
+            self.enc_step = 'mode'                           # proceed to encryption
+            self.send_lmp('encryption_mode_req', bytes([1]))
         elif name == 'power_control_req':
             self.send_lmp('power_control_res', bytes([0x00]), tid)
+        elif name in ('sniff_req', 'hold_req'):
+            # Keep the virtual link in active mode. The model cannot honour sniff/hold anchor timing,
+            # so if the glasses sleep in sniff the link goes silent and the firmware's supervision
+            # timer expires (detach reason 8) mid-bond -> "Bond failed". Reject so the glasses keep
+            # polling, on_tick keepalive keeps flowing, and bonding can complete.
+            self.send_lmp('not_accepted', bytes([LMP[name], 0x1a]), tid)   # 0x1a: unsupported LMP feature
         elif name == 'ping_req':
             self.send_lmp('ping_res', b'', tid)
         elif name == 'channel_classification_req':
@@ -354,9 +374,12 @@ class ClassicPhone:
         self.paired = True
         self.link_key = self.ssp.link_key()
         self.say('SSP complete: link key %s' % self.link_key.hex())
-        # Master drives link encryption (the radio cipher is a no-op in the model).
-        self.enc_step = 'mode'
-        self.send_lmp('encryption_mode_req', bytes([1]))
+        # Post-SSP legacy LMP authentication (E1) before encryption -- the glasses require it, or they
+        # leave PSM 3 pending and detach 0x22. Master challenges the glasses with au_rand first.
+        import os as _os
+        self.au_rand_be = _os.urandom(16)
+        self.send_lmp('au_rand', self.au_rand_be[::-1])   # LMP wire is little-endian
+        self.say('LMP -> au_rand (authenticate glasses)')
 
     def start_profiles_once(self):
         if not self.profiles_started:

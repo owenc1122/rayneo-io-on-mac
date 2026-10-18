@@ -46,6 +46,18 @@ phone() {  # phone <name> <seconds> <scenario> [PEER_ENV=val ...]: with the virt
     sleep 1
     EXTRA="$out/$name.peer.resc" run "$name" "$secs" "$scen" BOND_ADDR=c0:c0:ff:ee:00:01 BOND_OS=android
 }
+phone_classic() {  # like phone() but the virtual phone connects over classic BR/EDR (page/SSP/SPP),
+                   # not BLE: rnlink runs over RFCOMM channel 26. Pages at window 60, BLE disabled.
+    name=$1 secs=$2 scen=$3; shift 3
+    port=$(free_port)
+    mkdir -p "$out/$name"
+    env CLASSIC=1 CLASSIC_PAGE_AT=60 BLE_OFF=1 "$@" python3 scripts/ble-peer.py --port "$port" --log "$out/$name/peer.log" > /dev/null 2>&1 &
+    peer_pids="${peer_pids:-} $!"
+    sed "s/PeerPort [0-9]*/PeerPort $port/" Tests/scenarios/ble-peer.resc > "$out/$name.peer.resc"
+    sleep 1
+    EXTRA="$out/$name.peer.resc" run "$name" "$secs" "$scen" \
+        CLASSIC=1 CLASSIC_PAGE_AT=60 BLE_OFF=1 BOND_ADDR=c0:c0:ff:ee:00:01 BOND_OS=android
+}
 
 if [ -z "${SKIP_RUN:-}" ]; then
 run crown 20 crown.txt
@@ -65,6 +77,7 @@ phone settings 30 bt-settings.txt SETTINGS_DEMO=1
 phone todo 30 bt-todo.txt TODO_DEMO=1
 phone prompter 48 bt-prompter.txt PROMPT_DEMO=1
 phone ota 60 bt-ota.txt OTA_DIR="$fw" OTA_FILES=smf.json
+phone_classic weatherbt 135 bt-classic-weather.txt
 for p in $jobs_pids; do wait "$p"; done
 kill $peer_pids 2>/dev/null
 fi
@@ -91,6 +104,14 @@ for r in weather subtitle notification assistant btrecord settings todo prompter
 done
 # On-screen checks: a firmware log line that only appears once the phone-driven content is rendered.
 check "weather: data applied on dashboard" "[ \$(n weather 'json_len=136') -gt 0 ]"
+# Classic BT (BR/EDR): the same weather feature carried by rnlink over an RFCOMM/SPP channel instead
+# of BLE. Proves page -> ACL -> LMP -> SSP -> L2CAP/SDP/RFCOMM -> rnlink -> dashboard end to end.
+check "weatherbt: no firmware assert" "[ \$(n weatherbt 'dump_assert_info: Assert') -eq 0 ]"
+check "weatherbt: SPP (RFCOMM channel 26) opened over classic BT" "grep -q 'SPP (RFCOMM channel 26) open' '$out/weatherbt/peer.log'"
+check "weatherbt: rnlink authenticated over classic BT" "[ \$(n weatherbt 'auth success') -gt 0 ]"
+check "weatherbt: bonded, dashboard active (bond_state 2)" "[ \$(n weatherbt 'bond_state: 2') -gt 0 ]"
+check "weatherbt: weather data applied on dashboard over classic BT" "[ \$(n weatherbt 'json_len=136') -gt 0 ]"
+check "weatherbt: weather frame captured while connected" "[ \$(shots weatherbt) -ge 1 ]"
 check "subtitle: caption rendered (TranslationTextUpdate)" "[ \$(n subtitle 'onAction - TranslationTextUpdate') -gt 0 ]"
 check "notification: banner shown on screen" "[ \$(n notification 'Notification layer shown') -gt 0 ]"
 check "assistant: answer card rendered (ChatDomain)" "[ \$(n assistant 'ChatDomain::onMessageReceived') -gt 0 ]"
