@@ -32,10 +32,11 @@ class HfpAudioGateway:
                 AG_EXTENDED_ERRORS | AG_CODEC_NEGOTIATION | AG_HF_INDICATORS)
 
     def __init__(self, send, on_audio=None, say=None, operator='Virtual Carrier',
-                 own_number='+15550100'):
+                 own_number='+15550100', inband_ring=False):
         self.send, self.on_audio = send, on_audio
         self.say = say or (lambda *_: None)
         self.operator, self.own_number = operator, own_number
+        self.features = self.FEATURES | (AG_INBAND_RING if inband_ring else 0)
         self.rx = b''
         self.hf_features = 0
         self.hf_codecs = [CVSD]
@@ -85,7 +86,7 @@ class HfpAudioGateway:
         up = line.upper()
         if up.startswith('AT+BRSF='):
             self.hf_features = int(line[8:])
-            self._out('+BRSF: %d' % self.FEATURES)
+            self._out('+BRSF: %d' % self.features)
             self._ok()
         elif up.startswith('AT+BAC='):
             self.hf_codecs = [int(c) for c in line[7:].split(',') if c.strip().isdigit()]
@@ -210,12 +211,14 @@ class HfpAudioGateway:
             self._error(4)
 
     def _both(self, ag_bit, hf_bit):
-        return bool(self.FEATURES & ag_bit) and bool(self.hf_features & hf_bit)
+        return bool(self.features & ag_bit) and bool(self.hf_features & hf_bit)
 
     def _slc_up(self):
         if not self.slc:
             self.slc = True
             self.say('HFP service level connection established')
+            if self.features & AG_INBAND_RING:      # tell the HF we provide an in-band ring tone
+                self._out('+BSIR: 1')
 
     # ---- calls ----
     def _call(self, stat):

@@ -292,6 +292,8 @@ class ClassicPhone:
                         self.hfp_call_made = True
                         self.say('HFP SLC up -> raising incoming call +15550123')
                         self.hfp.incoming_call('+15550123')
+                        if os.environ.get('SCO_AUDIO'):         # in-band ring: open SCO during RING
+                            self.hfp.connect_audio()
                     elif self.hfp.ind.get('callsetup'):         # keep ringing until answered/screenshot
                         self.hfp.ring()
                 if self.a2dp and self.a2dp.state == 'streaming' and self.connected_events % 3 == 0:
@@ -678,7 +680,8 @@ class ClassicPhone:
 
     def _hfp_sdp_found(self, channel):
         from btprofiles import hfp
-        self.hfp = hfp.HfpAudioGateway(send=lambda b: self.dlc_write(self.hfp_dlci, b), say=self.say)
+        self.hfp = hfp.HfpAudioGateway(send=lambda b: self.dlc_write(self.hfp_dlci, b), say=self.say,
+                                       on_audio=self._sco_audio, inband_ring=bool(os.environ.get('SCO_AUDIO')))
         self.say('HFP: glasses HF on RFCOMM channel %d; opening AG SLC' % channel)
         self.hfp_dlci = self.rfcomm_open_dlc(channel, self.hfp.on_data, self._hfp_opened, 'HFP')
 
@@ -686,6 +689,14 @@ class ClassicPhone:
         # DLC up; the glasses' HF now drives the SLC AT handshake and the AG answers. The incoming
         # call is raised from on_activity once hfp.slc is set.
         self.say('HFP AG RFCOMM DLC up (DLCI %d); waiting for HF service-level connection' % dlci)
+
+    def _sco_audio(self, codec):
+        # hfp.py negotiated the codec (+BCS); now the (e)SCO link carries the voice. CVSD = narrow
+        # band (8 kHz), mSBC = wide band (16 kHz). The audio frames (60 B CVSD / 57 B mSBC per 7.5 ms)
+        # travel over the SCO link to the glasses' ScoService via intersys ch3 (controller bridge).
+        self.sco_codec = codec
+        self.say('HFP audio up: codec %s -> establishing (e)SCO link' % ('mSBC' if codec == 2 else 'CVSD'))
+        self.sco_pending = True                 # observed first: see whether the glasses LMP (e)SCO req
 
     # ---- A2DP source + AVRCP target (the phone streams music to the glasses' A2DP sink) -----------
     def start_a2dp(self):
