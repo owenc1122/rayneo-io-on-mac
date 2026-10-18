@@ -11,6 +11,7 @@ Packet types (header TYPE field): NULL 0, POLL 1, FHS 2, DM1 3, DH1 4, ...
 """
 import os
 import struct
+import ssp
 
 NULL, POLL, FHS, DM1, DH1 = 0, 1, 2, 3, 4
 
@@ -131,6 +132,13 @@ class ClassicPhone:
         self.connected_events = 0
         self.channels = {}
         self.profiles_started = False
+        self.ssp = None
+        self.paired = False
+        self.pk_frags_out = []
+        self.sweep = os.environ.get('SSP_SWEEP')
+        self.variants = ['', 'd', 'i', 'a', 'b', 'n', 'o', 'ab', 'db', 'ib', 'nb', 'na',
+                         'di', 'dab', 'nab', 'oab', 'oi', 'on', 'dn', 'iab', 'dib', 'ndab']
+        self.vi = 0
         self.on_spp_open = None         # callback(phone) when the rnlink SPP channel is up
         self.on_spp_data = None         # callback(bytes) for data from the glasses on SPP
         self.on_tick = None             # periodic phone-side work while connected
@@ -223,32 +231,137 @@ class ClassicPhone:
             if {'features_res', 'version_res'} <= self.lmp_done and not self.setup_sent:
                 self.setup_sent = True
                 self.send_lmp('host_connection_req')
+        elif name == 'accepted' and p and p[0] == LMP['encryption_mode_req']:
+            self.enc_step = 'size'
+            self.send_lmp('encryption_key_size_req', bytes([16]))
+        elif name == 'accepted' and p and p[0] == LMP['encryption_key_size_req']:
+            self.enc_step = 'start'
+            import os as _os
+            self.send_lmp('start_encryption_req', _os.urandom(16))
+        elif name == 'accepted' and p and p[0] == LMP['start_encryption_req']:
+            self.say('link encryption enabled; opening services')
+            self.start_profiles_once()
         elif name == 'accepted' and p and p[0] == LMP['host_connection_req']:
             self.say('LMP host connection accepted by the glasses')
             self.send_lmp('setup_complete')
+        elif name == 'accepted' and p and p[0] == LMP['encapsulated_header'] and self.pk_frags_out:
+            for frag in self.pk_frags_out:
+                self.send_lmp('encapsulated_payload', frag.ljust(16, b'\0'))
+            self.pk_frags_out = []
         elif name == 'setup_complete':
             self.say('LMP setup complete (glasses)')
-            if not self.profiles_started:
-                self.profiles_started = True
-                self.start_profiles()
+            if os.environ.get('SSP_RESPONDER'):
+                if not self.profiles_started:
+                    self.profiles_started = True
+                    self.start_profiles()
+            elif not self.paired and self.ssp is None:
+                self.start_pairing()
+        # ---- SSP (Just Works, P-192) ----
+        elif name == 'io_capability_req':
+            self.say('SSP <- io_cap_req (glasses initiate) io=%d oob=%d auth=%d' % (p[0], p[1], p[2]))
+            self.ssp = ssp.SspJustWorks(self.bdaddr[::-1], bytes.fromhex('554433221100'))
+            self.ssp.io_b = bytes([p[0], p[1], p[2]])   # initiator (glasses) io caps
+            self.ssp_responder = True
+            self.send_lmp('io_capability_res', bytes([0x03, 0x00, 0x00]))
+        elif name == 'io_capability_res':
+            # ext payload: IO_cap(1) OOB(1) AuthReq(1)
+            self.ssp.io_b = bytes([p[2], p[1], p[0]])
+            self.say('SSP <- io_cap_res io=%d oob=%d auth=%d' % (p[0], p[1], p[2]))
+            self.send_pubkey()
+        elif name == 'encapsulated_header':
+            self.pk_in = b''
+            self.send_lmp('accepted', bytes([LMP['encapsulated_header']]), tid)
+        elif name == 'encapsulated_payload':
+            self.pk_in += p[:16]
+            self.send_lmp('accepted', bytes([LMP['encapsulated_payload']]), tid)
+            if len(self.pk_in) >= 48:
+                self.ssp.set_air_pk_b(self.pk_in[:48])
+                self.say('SSP <- peer public key')
+        elif name == 'simple_pairing_confirm':
+            self.ssp.set_air_cb(p[:16])
+            self.say('SSP <- confirm (Cb)')
+            self.send_lmp('simple_pairing_number', self.ssp.air_na())   # initiator reveals Na
+        elif name == 'simple_pairing_number':
+            self.ssp.set_air_nb(p[:16])
+            ok = self.ssp.check_confirm()
+            self.say('SSP <- Nb; confirm %s; numeric %06d' % ('OK' if ok else 'MISMATCH', self.ssp.numeric()))
+            self.send_lmp('accepted', bytes([LMP['simple_pairing_number']]), tid)
+            self.send_lmp('DHkey_check', self.ssp.air_ea())        # Just Works: auto-accept, send Ea
+        elif name == 'DHkey_check' and getattr(self, 'ssp_responder', False):
+            self.say('SSP CAPTURE ea_air=%s pka=%s pkb_air=%s na=%s nb=%s dh=%s ioA=%s' % (
+                p[:16].hex(), self.ssp.pk_a.hex(), getattr(self,'pk_in',b'')[:48].hex(),
+                self.ssp.na.hex(), (self.ssp.nb or b'').hex(), (self.ssp.dh or b'').hex(), self.ssp.io_b.hex()))
+            return
+        elif name == 'DHkey_check':
+            good = self.ssp.check_air_eb(p[:16])
+            self.say('SSP <- Eb (%s)' % ('OK' if good else 'MISMATCH'))
+            self.send_lmp('accepted', bytes([LMP['DHkey_check']]), tid)
+            self.finish_pairing()
+        elif name == 'numeric_comparison_failed' or name == 'passkey_failed' or name == 'oob_failed':
+            self.say('SSP FAILED: %s' % name)
+        elif name == 'encryption_mode_req':
+            self.send_lmp('accepted', bytes([LMP['encryption_mode_req']]), tid)
+        elif name == 'encryption_key_size_req':
+            self.send_lmp('accepted', bytes([LMP['encryption_key_size_req']]), tid)
+        elif name == 'start_encryption_req':
+            self.send_lmp('accepted', bytes([LMP['start_encryption_req']]), tid)
+            self.say('link encrypted (radio cipher is a no-op in the model)')
+        elif name == 'au_rand':
+            # Legacy mutual auth with the SSP link key: SRES via E1. The radio/BTC computes it on real
+            # hardware; here just acknowledge so the firmware proceeds (SRES is checked by the BTC model side).
+            self.send_lmp('sres', bytes(4), tid)
         elif name == 'power_control_req':
             self.send_lmp('power_control_res', bytes([0x00]), tid)
         elif name == 'ping_req':
             self.send_lmp('ping_res', b'', tid)
         elif name == 'channel_classification_req':
             pass
+        elif name == 'not_accepted' and p and p[0] == LMP['DHkey_check']:
+            self.say('SSP DHkey check rejected by the glasses')
         elif name in ('accepted', 'not_accepted', 'accepted_ext', 'not_accepted_ext', 'auto_rate',
                       'preferred_rate', 'max_slot', 'max_power', 'min_power'):
             pass
         elif name == 'detach':
             self.say('LMP detach from the glasses, reason 0x%02x' % (p[0] if p else 0))
-            self.state = 'idle'
-            self.pscans = -10 ** 9          # do not page again in this run
+            if self.sweep and not self.paired and self.vi < len(self.variants):
+                self.reset_for_repair()
+            else:
+                self.state = 'idle'
+                self.pscans = -10 ** 9
         elif name in LMP_EXT:
             # Any other extended request (packet type table, sniff subrating, ...): accept it.
             self.send_lmp('accepted_ext', bytes([127, LMP_EXT[name]]), tid)
         else:
             self.send_lmp('accepted', bytes([LMP[name]]) if name in LMP else bytes([pdu[0] >> 1]), tid)
+
+    # ---- SSP pairing (initiator) -----------------------------------------------------------------
+    def reset_for_repair(self):
+        self.state = "idle"; self.pscans = 0; self.page_at = 3; self.txq = []; self.lmp_done = set()
+        self.setup_sent = False; self.profiles_started = False; self.channels = {}
+        self.ssp = None; self.pk_frags_out = []; self.connected_events = 0
+
+    def start_pairing(self):
+        self.ssp = ssp.SspJustWorks(self.bdaddr[::-1], bytes.fromhex('554433221100'))
+        self.say('SSP -> start pairing (Just Works, P-192)')
+        self.send_lmp('io_capability_req', bytes([0x03, 0x00, 0x00]))
+
+    def send_pubkey(self):
+        pk = self.ssp.air_pk_a()
+        self.send_lmp('encapsulated_header', bytes([1, 1, len(pk)]))
+        self.pk_frags_out = [pk[i:i + 16] for i in range(0, len(pk), 16)]
+
+    def finish_pairing(self):
+        self.paired = True
+        self.link_key = self.ssp.link_key()
+        self.say('SSP complete: link key %s' % self.link_key.hex())
+        # Master drives link encryption (the radio cipher is a no-op in the model).
+        self.enc_step = 'mode'
+        self.send_lmp('encryption_mode_req', bytes([1]))
+
+    def start_profiles_once(self):
+        if not self.profiles_started:
+            self.profiles_started = True
+            self.start_profiles()
 
     # ---- ACL-U (L2CAP, Core spec Vol 3 Part A) ---------------------------------------------------
     ACL_MAX = 17                        # DM1 payload; L2CAP PDUs are fragmented to fit
