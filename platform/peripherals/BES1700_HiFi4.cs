@@ -14,7 +14,9 @@
 // Audio: record streams get PCM from MicFile (raw s16le mono 16 kHz, or a WAV) and are encoded as the
 // AP asks (pcm, or Opus through macOS AudioToolbox); played streams are decoded (mp3/aac/opus/pcm,
 // AudioToolbox) and appended to SpeakerFile as 48 kHz stereo s16le, the DSP's apserver mix format. The DSP's own algorithms (Elevoc "up"
-// beamforming DLL, "wakeup" KWS DLL) are Xtensa code and are not reproduced.
+// NS/beamforming DLL, "wakeup" KWS DLL) are Xtensa code; in their places run a Wiener noise suppressor on the record
+// path (BES1700_HiFi4Ns.cs) and a keyword classifier on the wakeup stream (BES1700_HiFi4KwsNet.cs). Bluetooth: SCO
+// voice through "scodn"/"scoup" (mSBC/CVSD, BES1700_HiFi4Sco.cs) and A2DP AAC from the AP's kfifo (BES1700_HiFi4A2dp.cs).
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -76,6 +78,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         // ~0.6 s of host time landed in the middle of the emulated double-click that opens the stream.
         public string KwsTemplates { get { return kwsDir; } set { lock(micLock) { kwsDir = value; spotters = null; LoadSpotters(); } } }
         public double KwsThreshold { get { return kwsThreshold; } set { lock(micLock) { kwsThreshold = value; spotters = null; } } }
+        // 「小雷小雷」 classifier (platform/kws/xiaolei.model, scripts/train-kws.py); when set it decides event 4 and
+        // the templates are only used for the English wake words.
+        public string KwsModel { get { return kwsModel; } set { lock(micLock) { kwsModel = value; keywordNet = string.IsNullOrEmpty(value) ? null : new HiFi4KeywordNet(value); this.Log(LogLevel.Info, "hifi4: keyword classifier {0}", value); } } }
+        public string KwsModelScan(string wav) { return keywordNet == null ? "no keyword model" : keywordNet.Scan(wav); }
+        private string kwsModel; private HiFi4KeywordNet keywordNet;
         private double kwsThreshold = 16.5;
         // Offline check of the spotter on a WAV: hit times (s) and the best (lowest) score.
         public string KwsScan(string wav)
@@ -121,12 +128,30 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         // ---- second-stage wake word (what the DSP "wakeup" library decides on stream 0x1b).
         // The AP opens 0x1b after the BTH first stage fired; the DSP then reports one hifi event via a
         // Notify: 4 = 小雷小雷 confirmed, 2/3 = ok/hey rayneo, 6 = rejected, 0 = history ("predata") pushed.
+        // The decision is made on the stream's own audio, as the DSP library does: the spotter starts fresh,
+        // scores the VAD history the stream opens with (the BTH keeps the last seconds before "vad ready";
+        // 3 s here), then the live audio until it confirms or the window ends. A wake word recognised by
+        // the Mac (KeywordAt) in that window counts as well.
         private void StartWakeDecision(Pipe s)
         {
             wakeStream = s.Index; wakeDeadline = MicNow() + 2 * MicRate;
             SendNotify(s.Index, 0x11, 0);   // the vad history was replayed into the stream
-            if(lastKeyword > MicNow() - 3 * MicRate) DecideWake(lastKeywordEvent);
-            else this.Log(LogLevel.Info, "hifi4: wakeup stream open, listening for the wake word");
+            this.Log(LogLevel.Info, "hifi4: t={0:0.000}s wakeup stream open, scoring {1:0.0} s of VAD history", MicNow() / (double)MicRate, WakeHistory / (double)MicRate);
+            lock(micLock) {
+                long now = MicNow();
+                foreach(var sp in LoadSpotters().Values) sp.Reset();
+                keywordNet?.Reset();
+                var history = MicSamples(now - WakeHistory, WakeHistory);
+                spotBase = now - WakeHistory;
+                for(int at = 0; at < history.Length && wakeStream >= 0; at += 160) {
+                    var block = new short[160]; Array.Copy(history, at, block, 0, Math.Min(160, history.Length - at));
+                    Spot(block, block.Length, spotBase + at + 160);
+                }
+            }
+            if(wakeStream >= 0 && lastKeyword > MicNow() - 3 * MicRate) {
+                this.Log(LogLevel.Info, "hifi4: wake word (event {0}) recognised by the Mac in the history", lastKeywordEvent);
+                DecideWake(lastKeywordEvent);
+            }
         }
 
         private void OnKeyword() { if(wakeStream >= 0) DecideWake(lastKeywordEvent); }
@@ -493,15 +518,26 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             // DSP produces for the AP (arec*, wakeup, ...): [4,1]. AP produces for the DSP (aplay*): [1,4].
             if(cpu0 == 4 && cpu1 == 1) s.Writer = true;
             else if(cpu0 == 1 && cpu1 == 4) s.Reader = true;
+            // Bluetooth voice (smf 0x28/0x29, cpus [4,0]): the AP's ScoService writes the controller's frames into
+            // "scodn" and sends what the DSP writes to "scoup"; the AP allocates both FIFOs (possibly after the Add).
+            if(name == "scodn") s.Reader = true;
+            if(name == "scoup") s.Writer = true;
+            // A2DP sink (smf 0x24, cpus [4,0]): "a2dp=[omediaScript=[codec=aac,pkg=#6],kfifo=#<AP address>,vol=#..]".
+            if(param.Contains("kfifo=#") && param.Contains("omediaScript")) {
+                s.Reader = true; s.Kfifo = ParamNumber(param, "kfifo", 0); s.Codec = ParamWord(param, "codec", "aac"); s.Latm = new LatmDemuxer();
+            }
             if(s.Writer) {
                 ParseFormat(s);
-                var blk = blocks.TryGetValue(name, out var b) ? b : Allocate(name, FifoSize(8192, 16));
-                if(blk == null) return false;
-                s.Fifo = blk.Address;
-                FifoInitialize(s.Fifo, 8192, 16);
-                FifoInitWrite(s.Fifo);
-                FifoWriteMedia(s);
-                s.NextTick = now;
+                if(s.FrameUs == 0) s.FrameUs = s.FrameMs * 1000;
+                if(s.Sco == null) {
+                    var blk = blocks.TryGetValue(name, out var b) ? b : Allocate(name, FifoSize(8192, 16));
+                    if(blk == null) return false;
+                    s.Fifo = blk.Address;
+                    FifoInitialize(s.Fifo, 8192, 16);
+                    FifoInitWrite(s.Fifo);
+                    FifoWriteMedia(s);
+                }
+                s.NextTickUs = now * 1000;
                 s.NextSample = MicNow();
                 if(name == "wakeup") s.NextSample -= MicRate / 5;   // pcm-preset htime=200: replay the last 200 ms
             }
@@ -546,6 +582,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             s.Rate = ParamNumber(f, "rate", 16000); s.Channels = ParamNumber(f, "ch", 1); s.Bits = ParamNumber(f, "bits", 16);
             s.Codec = ParamWord(e, "keys", "pcm");
             uint bytesPerMs = s.Rate * s.Channels * (s.Bits / 8) / 1000;
+            if(s.Codec == "msbc" || s.Codec == "cvsd") {
+                // one encoded frame per 7.5 ms (mSBC 57 bytes from 120 samples at 16 kHz, CVSD 60 bytes at 8 kHz)
+                s.Sco = s.Codec == "msbc" ? (object)new MsbcCodec() : new CvsdCodec();
+                s.FrameUs = 7500; s.FrameMs = 7;
+                return;
+            }
             if(s.Codec == "pcm") {
                 s.FrameBytes = ParamNumber(e, "imin", s.Name == "wakeup" ? 640u : 1920u);
                 s.FrameMs = Math.Max(1, s.FrameBytes / Math.Max(1, bytesPerMs));
@@ -623,7 +665,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             uint d = b + descOff + (wrCnt % fmax) * 0x28;
             uint payload = b + dataOff + (uint)(pos % bmax);
             Wr(payload, data);
-            Wr32(d, size); Wr16(d + 4, 0); Wr16(d + 6, 0); Wr32(d + 8, s.Frames); Wr32(d + 0xc, (uint)(s.Frames * s.FrameMs));
+            Wr32(d, size); Wr16(d + 4, 0); Wr16(d + 6, 0); Wr32(d + 8, s.Frames); Wr32(d + 0xc, (uint)((ulong)s.Frames * s.FrameUs / 1000));
             Wr32(d + 0x10, 0); Wr32(d + 0x14, dataOff + (uint)(pos % bmax)); Wr64(d + 0x18, pos); Wr32(d + 0x20, 0); Wr32(d + 0x24, 0);
             Wr64(b + 0x148, next);
             Wr32(b + 0x144, wrCnt + 1);
@@ -657,6 +699,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             uint size = Rd32(d), ptr = Rd32(d + 0x10);
             uint data = ptr != 0 ? ptr : b + Rd32(d + 0x14);
             var bytes = Rd(data, (int)Math.Min(size, 0x20000));
+            s.LastFlags = (ushort)Rd16(d + 4);   // 1 = bad frame (ScoService: CRC/header error or CVSD idle pattern)
             Wr64(b + 0x48, Rd64(d + 0x18) + size);
             Wr32(b + 0x44, rdCnt + 1);
             Wr16(b + 0x50, s.MediaSeq);
@@ -666,10 +709,16 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private void PumpStream(Pipe s)
         {
             if(s.Writer) {
-                while(now >= s.NextTick) {
-                    s.NextTick += s.FrameMs;
-                    var pcm = MicFrame(s);
-                    var frame = s.Encoder != null ? s.Encoder.Encode(pcm) : pcm;
+                if(s.Sco != null && s.Fifo == 0) {
+                    // scoup: the AP allocates and opens the FIFO; write into it once it exists
+                    if(!blocks.TryGetValue(s.Name, out var blk)) { s.NextTickUs = now * 1000; return; }
+                    s.Fifo = blk.Address; FifoInitWrite(s.Fifo); FifoWriteMedia(s);
+                }
+                while(now * 1000 >= s.NextTickUs) {
+                    s.NextTickUs += s.FrameUs;
+                    var pcm = s.Sco != null ? null : MicFrame(s);
+                    var frame = s.Sco != null ? ScoEncode(s) : s.Encoder != null ? s.Encoder.Encode(pcm) : pcm;
+                    if(pcm == null) pcm = frame;
                     if(frame == null || frame.Length == 0) continue;
                     if(s.Head != 0) {
                         // head: u16 packet length, u16 0, u32 timestamp (ms since the stream started)
@@ -682,8 +731,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     if(s.Frames == 1 || s.Frames == 10 || (s.Frames % 100) == 0) this.Log(LogLevel.Info, "hifi4: {0} -> AP frame {1} ({2} bytes {3}, input peak {4})", s.Name, s.Frames, frame.Length, s.Codec, Peak(pcm));
                 }
             } else if(s.Reader) {
-                if(s.Fifo == 0 && blocks.TryGetValue(s.Name, out var blk)) s.Fifo = blk.Address;
-                if(s.Fifo == 0) return;
+                if(s.Fifo == 0 && s.Kfifo == 0 && blocks.TryGetValue(s.Name, out var blk)) s.Fifo = blk.Address;
+                if(s.Fifo == 0 && s.Kfifo == 0) return;
                 // The DSP plays in real time: take a frame only while less than 200 ms of decoded audio is
                 // queued ahead of the (virtual) playback clock, so the AP is paced as by the real speaker DMA.
                 // a pause of 300 ms ends the current utterance (the player keeps utterances whole)
@@ -691,7 +740,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 for(int i = 0; i < 16; i++) {
                     long played = s.PlayStart < 0 ? 0 : (long)(now - (ulong)s.PlayStart) * 48 * 4;   // bytes due by now
                     if(s.PlayStart >= 0 && s.SpeakerBytes - s.PlayedBase > played + 48 * 4 * 200) break;
-                    var data = FifoRead(s);
+                    var data = s.Kfifo != 0 ? A2dpRead(s) : FifoRead(s);
                     if(data == null) break;
                     if(s.PlayStart < 0) { s.PlayStart = (long)now; s.SegmentStart = s.SpeakerBytes; s.PlayedBase = s.SpeakerBytes; SpeakerEvent("start " + s.Name); }
                     s.LastAudio = now;
@@ -713,18 +762,21 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         // ---- microphone timeline: one 16 kHz mono signal indexed by virtual time, shared by every
         // consumer (DSP record streams, codec ADC2 for the BTH, the wake-word spotter), like the real mics.
         public long MicNow() { return (long)(machine.ElapsedVirtualTime.TimeElapsed.TotalSeconds * MicRate); }
-        public short[] MicSamples(long start, int count)
+        public short[] MicSamples(long start, int count) { return MicSamples(start, count, ring); }
+        private short[] MicSamples(long start, int count, short[] source)
         {
             lock(micLock) {
                 Fill(start + count);
                 var r = new short[Math.Max(0, count)];
                 for(int i = 0; i < r.Length; i++) {
                     long idx = start + i;
-                    if(idx >= 0 && idx < ringEnd && idx >= ringEnd - Ring) r[i] = ring[idx % Ring];
+                    if(idx >= 0 && idx < ringEnd && idx >= ringEnd - Ring) r[i] = source[idx % Ring];
                 }
                 return r;
             }
         }
+        // Noise suppression in the record path (the stand-in for the "up" library); off = raw microphone.
+        public bool NoiseSuppression { get; set; } = true;
         // A wake word recognised by the host (the Mac app's on-device speech recogniser) that ends at byte
         // <offset> of MicFile; it counts when the timeline reaches that audio. event: 4 小雷小雷, 2 ok, 3 hey rayneo.
         public void KeywordAt(long offset, uint ev) { lock(micLock) hostKeywords.Add(new KeyValuePair<long, uint>(offset, ev)); }
@@ -739,8 +791,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 int n = (int)Math.Min(upTo - ringEnd, 160);
                 var block = ReadSource(n);
                 for(int i = 0; i < n; i++) ring[(ringEnd + i) % Ring] = block[i];
+                // the "up" library's output (noise suppressed, 32 ms later), same indexing
+                var clean = (short[])block.Clone();
+                if(NoiseSuppression) ns.Process(clean, n);
+                for(int i = 0; i < n; i++) nsRing[(ringEnd + i) % Ring] = clean[i];
                 ringEnd += n;
-                Spot(block, n);
+                Spot(block, n, ringEnd);
                 if(hostReported) {
                     hostReported = false;
                     this.Log(LogLevel.Info, "hifi4: t={0:0.000}s wake word (event {1}) recognised by the Mac", ringEnd / (double)MicRate, lastKeywordEvent);
@@ -813,27 +869,36 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             return r;
         }
 
-        private void Spot(short[] block, int n)
+        private void Spot(short[] block, int n, long end)
         {
+            if(wakeStream < 0) return;   // the "wakeup" library only runs on the open wakeup stream
             // The AP accepts 小雷小雷 (4) in word mode 1 and OK/Hey RayNeo (2/3) in word mode 2
             // (rayneo_audio_kws_use_eng_word_only flag 0x19d0e4c8); listen for that set only.
             bool english = Rd8(WordModeFlag) != 0;
+            if(!english && keywordNet != null) {
+                if(keywordNet.Push(block, n) < 0) return;
+                this.Log(LogLevel.Info, "hifi4: t={0:0.000}s wake word 「小雷小雷」 found in the wakeup stream audio (classifier {1:0.000})", end / (double)MicRate, keywordNet.LastScore);
+                DecideWake(4);
+                return;
+            }
             foreach(var kv in LoadSpotters()) {
                 if((kv.Key == 4) == english) continue;
                 if(kv.Value.Push(block, n) < 0) continue;
-                lastKeyword = ringEnd; lastKeywordEvent = kv.Key;   // the hit ends within this block
-                this.Log(LogLevel.Info, "hifi4: t={0:0.000}s wake word {1} heard on the microphone (score {2:0.0})", ringEnd / (double)MicRate,
+                this.Log(LogLevel.Info, "hifi4: t={0:0.000}s wake word {1} found in the wakeup stream audio (score {2:0.0})", end / (double)MicRate,
                     kv.Key == 4 ? "「小雷小雷」" : kv.Key == 2 ? "\"OK RayNeo\"" : "\"Hey RayNeo\"", kv.Value.LastBest);
-                OnKeyword();
+                DecideWake(kv.Key);
+                return;
             }
         }
 
         private byte[] MicFrame(Pipe s)
         {
             int frameSamples = (int)(s.FrameBytes / (s.Channels * 2));
-            var mono = MicSamples(s.NextSample, frameSamples);
+            // Record streams get the "up" output (noise suppressed); the wakeup stream (0x1b) is fed from the
+            // BTH VAD history, which does not go through "up" (smf.json arserver sink 0x1b: pcm-preset keys=vad).
+            var mono = MicSamples(s.NextSample, frameSamples, s.Index == WakeupStream ? ring : nsRing);
             s.NextSample += frameSamples;
-            // Every microphone channel of the requested layout carries the same signal (one talker, quiet room).
+            // Every channel of the requested layout carries the same signal (one talker).
             var frame = new byte[s.FrameBytes];
             for(int i = 0; i < frameSamples; i++)
                 for(int c = 0; c < s.Channels; c++) { frame[(i * s.Channels + c) * 2] = (byte)mono[i]; frame[(i * s.Channels + c) * 2 + 1] = (byte)(mono[i] >> 8); }
@@ -879,6 +944,30 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             if(string.IsNullOrEmpty(spkPath)) return;
             try {
                 if(spkStream == null) spkStream = new FileStream(spkPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+                if(s.Latm != null) {
+                    // A2DP: one AAC access unit (AudioToolbox, cookie = the in-band AudioSpecificConfig)
+                    if(s.Decoder == null && !s.DecoderFailed) {
+                        try {
+                            s.Decoder = new HostDecoder("aac", (uint)s.Latm.SampleRate, (uint)s.Latm.Channels, 1024, LatmDemuxer.Esds(s.Latm.AudioSpecificConfig));
+                            this.Log(LogLevel.Info, "hifi4: {0}: AAC {1} Hz {2} ch from the LATM stream", s.Name, s.Latm.SampleRate, s.Latm.Channels);
+                        } catch(Exception x) { s.DecoderFailed = true; this.Log(LogLevel.Warning, "hifi4: {0}: no AAC decoder ({1})", s.Name, x.Message); }
+                    }
+                    if(s.Decoder == null) return;
+                    var music = s.Decoder.Decode(data);
+                    s.SpeakerBytes += music.Length;
+                    spkStream.Write(music, 0, music.Length); spkStream.Flush();
+                    return;
+                }
+                if(s.Codec == "msbc" || s.Codec == "cvsd") {
+                    // call audio: decode (bad frames concealed), 16/8 kHz mono -> the 48 kHz stereo mix
+                    if(s.Sco == null || (s.Sco is MsbcCodec) != (s.Codec == "msbc")) s.Sco = s.Codec == "msbc" ? (object)new MsbcCodec() : new CvsdCodec();
+                    bool bad = s.LastFlags != 0;
+                    var voice = s.Sco is MsbcCodec m ? m.Decode(data, bad) : ((CvsdCodec)s.Sco).Decode(data, bad);
+                    var mix = Upsample(s, voice, s.Codec == "msbc" ? 3 : 6);
+                    s.SpeakerBytes += mix.Length;
+                    spkStream.Write(mix, 0, mix.Length); spkStream.Flush();
+                    return;
+                }
                 if(s.Decoder == null && !s.DecoderFailed) {
                     try { s.Decoder = new HostDecoder(s.Codec, s.Rate == 0 ? 48000 : s.Rate, s.Channels == 0 ? 2 : s.Channels, s.FrameSamples, s.Cookie); }
                     catch(Exception x) { s.DecoderFailed = true; this.Log(LogLevel.Warning, "hifi4: {0}: no decoder for {1} ({2}); frames written undecoded to {3}.{1}", s.Name, s.Codec, x.Message, spkPath); }
@@ -893,6 +982,53 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             } catch(Exception e) {
                 if(errorBudget-- > 0) this.Log(LogLevel.Warning, "hifi4: speaker {0}: {1}", spkPath, e.Message);
             }
+        }
+
+        // Next AAC access unit from the A2DP kfifo (the AP advances "in", the DSP "out"), or null.
+        private byte[] A2dpRead(Pipe s)
+        {
+            uint k = s.Kfifo;
+            var au = s.Latm.Next();
+            if(au != null) return au;
+            uint buf = Rd32(k), size = Rd32(k + 4), inCnt = Rd32(k + 8), outCnt = Rd32(k + 0xc);
+            if(size == 0 || (size & (size - 1)) != 0) return null;
+            uint len = Math.Min(inCnt - outCnt, 4096u);
+            if(len == 0) return null;
+            uint off = outCnt & (size - 1), first = Math.Min(len, size - off);
+            var data = new byte[len];
+            Rd(buf + off, (int)first).CopyTo(data, 0);
+            if(len > first) Rd(buf, (int)(len - first)).CopyTo(data, (int)first);
+            Wr32(k + 0xc, outCnt + len);
+            if(s.Codec != "aac") {
+                if(errorBudget-- > 0) this.Log(LogLevel.Warning, "hifi4: {0}: {1} in the A2DP kfifo is not supported (only AAC LATM framing is known); dropped", s.Name, s.Codec);
+                return null;
+            }
+            s.Latm.Append(data);
+            return s.Latm.Next();
+        }
+
+        // 7.5 ms of the uplink microphone (the "up" output, as the call path uses it) encoded for scoup.
+        private byte[] ScoEncode(Pipe s)
+        {
+            var mic = MicSamples(s.NextSample, 120, nsRing); s.NextSample += 120;
+            if(s.Sco is MsbcCodec m) return m.Encode(mic);
+            var narrow = new short[60];
+            for(int i = 0; i < 60; i++) narrow[i] = (short)((mic[2 * i] + mic[2 * i + 1]) / 2);
+            return ((CvsdCodec)s.Sco).Encode(narrow);
+        }
+
+        // Mono voice at 48000/factor Hz -> 48 kHz stereo s16le (linear interpolation).
+        private static byte[] Upsample(Pipe s, short[] x, int factor)
+        {
+            var o = new byte[x.Length * factor * 4];
+            for(int i = 0, k = 0; i < x.Length; i++) {
+                for(int j = 1; j <= factor; j++, k += 4) {
+                    short v = (short)(s.LastSample + (x[i] - s.LastSample) * j / factor);
+                    o[k] = (byte)v; o[k + 1] = (byte)(v >> 8); o[k + 2] = (byte)v; o[k + 3] = (byte)(v >> 8);
+                }
+                s.LastSample = x[i];
+            }
+            return o;
         }
 
         // ---------------------------------------------------------------- bus helpers
@@ -917,7 +1053,8 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             public byte Index; public string Name; public string Param; public int Refs;
             public bool Writer, Reader, ReaderReady; public uint Fifo; public ushort MediaSeq;
             public uint Rate = 16000, Channels = 1, Bits = 16, FrameBytes = 1920, FrameMs = 60; public string Codec = "pcm";
-            public ulong NextTick; public uint Frames; public long NextSample; public uint Bitrate, Application, FrameSamples, Head; public long SpeakerBytes; public byte[] Cookie;
+            public uint Kfifo; public LatmDemuxer Latm;
+            public ulong NextTickUs; public uint FrameUs; public object Sco; public ushort LastFlags; public short LastSample; public uint Frames; public long NextSample; public uint Bitrate, Application, FrameSamples, Head; public long SpeakerBytes; public byte[] Cookie;
             public HostOpusEncoder Encoder;
             public HostDecoder Decoder; public bool DecoderFailed; public long PlayStart = -1, SegmentStart, PlayedBase; public ulong LastAudio;
         }
@@ -1086,12 +1223,15 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private static readonly SortedDictionary<uint, HiFi4KeywordSpotter> empty = new SortedDictionary<uint, HiFi4KeywordSpotter>();
         private int wakeStream = -1; private long wakeDeadline; private uint lastKeywordEvent = 4; private byte notifySeq;
         private FileStream micStream, spkStream;
-        private long micDataStart, srcPos = -1, ringEnd, skipped, lastKeyword = long.MinValue;
+        private long micDataStart, srcPos = -1, ringEnd, skipped, lastKeyword = long.MinValue, spotBase;
         private double noiseFloor = 200;
-        private readonly short[] ring = new short[Ring];
+        private readonly short[] ring = new short[Ring], nsRing = new short[Ring];
+        private readonly HiFi4NoiseSuppressor ns = new HiFi4NoiseSuppressor();
         private readonly object micLock = new object();
         private readonly List<KeyValuePair<long, uint>> hostKeywords = new List<KeyValuePair<long, uint>>();
         private bool hostReported, liveSpeech; private int quietBlocks, liveLogBudget = 50;
         private const int MicRate = 16000, Ring = 60 * MicRate;
+        private const byte WakeupStream = 0x1b;
+        private const int WakeHistory = 3 * MicRate;
     }
 }
