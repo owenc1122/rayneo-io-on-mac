@@ -304,15 +304,30 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 var tx=TxChain(act.Cs,false);
                 foreach(var d in tx) line.Append(" tx=").Append(d);
                 string reply=PeerCall(line.ToString());
-                // "PAGE <hex>" would carry the pager's FHS/ID; RX delivery into the classic cs is the
-                // next step (needs the inline RX-descriptor + frame-status encoding).
-                if(reply.StartsWith("PAGE ") && TraceEvents)
-                    this.Log(LogLevel.Info,"classic page offered: {0}",reply.Substring(5));
+                // "PAGE <hex>" carries the pager's ID/FHS. Observation step: raise RxAct (fifo bit4)
+                // for this page-scan activity so the firmware's RX path runs; hooks on the rwip page
+                // functions + asserts then reveal which EM fields it reads (the classic rxdesc layout).
+                // ClassicRxPattern fills a 0xA5A5 pattern into the EM RX window first.
+                if(reply.StartsWith("PAGE ") && !classicPaged) {
+                    classicPaged=true;
+                    if(TraceEvents) this.Log(LogLevel.Info,"classic page offered: {0} -> inject RxAct on ET{1} cs {2:x}",reply.Substring(5),act.Index,act.Cs);
+                    ClassicRxPattern(act.Cs);
+                    fifo.Enqueue(((uint)act.Index<<24)|RxAct);
+                    act.Length=Math.Min(act.Length,1200);
+                }
             } catch(Exception e) {
                 this.Log(LogLevel.Warning,"classic peer: {0}",e.Message);
                 peer?.Dispose(); peer=null;
             }
         }
+        // Observation aid: fill the classic cs tail (beyond the fields the firmware itself set) with a
+        // 0xA5A5 pattern so that whatever rxdesc field the page RX path reads shows up distinctively in
+        // the rwip asserts. Preserves cs+0 (format) and cs+0x14 (control) which the firmware owns.
+        private void ClassicRxPattern(ulong cs) {
+            for(ulong o=0x20;o<0x78;o+=2) EmWW(cs+o,0xa5a5);
+            if(TraceEvents) this.Log(LogLevel.Info,"classic rxdesc reg828={0:x} cs+0x1c={1:x4} cs+0x26={2:x4}",base.ReadDoubleWord(0x828),EmRW(cs+0x1c),EmRW(cs+0x26));
+        }
+        private bool classicPaged;
         private string BdAddr(ulong cs) { var sb=new System.Text.StringBuilder();
             for(ulong i=0;i<6;i++) sb.AppendFormat("{0:x2}",EmRB(cs+0x8+i));
             return sb.ToString();
