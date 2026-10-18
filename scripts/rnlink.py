@@ -506,8 +506,10 @@ class RnlinkPhone:
             self.set_prompter_mode()
             self.remote_start_prompter(code=1)
             return
-        # The glasses pulls the list on connect (requestFileListSync); push the full sequence once.
-        if not getattr(self, 'prompter_sent', False):
+        # The glasses pull the list on connect (requestFileListSync). Only the prompter demo answers
+        # with a script: a pushed script now really opens and runs the prompter, which would take
+        # over the screen in every other phone scenario.
+        if self.prompt_demo and not getattr(self, 'prompter_sent', False):
             self.push_prompter()
 
     def push_prompter(self, text=None, title='演示提词稿'):
