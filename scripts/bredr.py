@@ -10,6 +10,7 @@ Baseband page procedure (Core spec Vol 2 Part B 8.3), slave side as the stock rw
 Packet types (header TYPE field): NULL 0, POLL 1, FHS 2, DM1 3, DH1 4, ...
 """
 import os
+import struct
 
 NULL, POLL, FHS, DM1, DH1 = 0, 1, 2, 3, 4
 
@@ -128,6 +129,11 @@ class ClassicPhone:
         self.lmp_done = set()
         self.setup_sent = False
         self.connected_events = 0
+        self.channels = {}
+        self.profiles_started = False
+        self.on_spp_open = None         # callback(phone) when the rnlink SPP channel is up
+        self.on_spp_data = None         # callback(bytes) for data from the glasses on SPP
+        self.on_tick = None             # periodic phone-side work while connected
 
     # ---- air interface -------------------------------------------------------------------------
     def on_activity(self, w):
@@ -159,6 +165,8 @@ class ClassicPhone:
                 return 'RX %x %x' % (POLL, self.lt_addr)
             if self.state == 'connected':
                 self.connected_events += 1
+                if self.on_tick and self.connected_events % 16 == 0:
+                    self.on_tick()
                 if self.txq:
                     t, llid, payload = self.txq.pop(0)
                     return 'RX %x %x %x %s' % (t, self.lt_addr, llid, payload.hex())
@@ -220,6 +228,9 @@ class ClassicPhone:
             self.send_lmp('setup_complete')
         elif name == 'setup_complete':
             self.say('LMP setup complete (glasses)')
+            if not self.profiles_started:
+                self.profiles_started = True
+                self.start_profiles()
         elif name == 'power_control_req':
             self.send_lmp('power_control_res', bytes([0x00]), tid)
         elif name == 'ping_req':
@@ -239,12 +250,257 @@ class ClassicPhone:
         else:
             self.send_lmp('accepted', bytes([LMP[name]]) if name in LMP else bytes([pdu[0] >> 1]), tid)
 
-    # ---- ACL-U (L2CAP) ---------------------------------------------------------------------------
+    # ---- ACL-U (L2CAP, Core spec Vol 3 Part A) ---------------------------------------------------
+    ACL_MAX = 17                        # DM1 payload; L2CAP PDUs are fragmented to fit
+
+    def send_l2cap(self, cid, payload):
+        pdu = struct.pack('<HH', len(payload), cid) + payload
+        first = True
+        while pdu:
+            chunk, pdu = pdu[:self.ACL_MAX], pdu[self.ACL_MAX:]
+            self.txq.append((DM1, 2 if first else 1, chunk))
+            first = False
+
     def on_acl(self, llid, data):
-        self.say('ACL <- llid %d %s' % (llid, data.hex()))
+        if llid == 2:
+            self.rx_l2cap = data
+        else:
+            self.rx_l2cap = getattr(self, 'rx_l2cap', b'') + data
+        if len(self.rx_l2cap) >= 4:
+            ln, cid = struct.unpack_from('<HH', self.rx_l2cap)
+            if len(self.rx_l2cap) >= 4 + ln:
+                pdu, self.rx_l2cap = self.rx_l2cap[4:4 + ln], b''
+                self.on_l2cap(cid, pdu)
+
+    def on_l2cap(self, cid, pdu):
+        if cid == 1:
+            self.on_signal(pdu)
+        elif cid in self.channels:
+            ch = self.channels[cid]
+            ch['handler'](pdu)
+        else:
+            self.say('L2CAP <- cid 0x%04x (unknown) %s' % (cid, pdu.hex()))
+
+    # L2CAP signaling (CID 1). Commands: code, identifier, length, data.
+    def signal(self, code, data):
+        self.sig_id = getattr(self, 'sig_id', 0) % 255 + 1
+        self.send_l2cap(1, struct.pack('<BBH', code, self.sig_id, len(data)) + data)
+        return self.sig_id
+
+    def connect_psm(self, psm, handler, on_open):
+        scid = 0x40 + len(self.channels)
+        self.channels[scid] = dict(psm=psm, dcid=None, handler=handler, on_open=on_open,
+                                   conf_out=False, conf_in=False, open=False)
+        self.say('L2CAP -> connect PSM 0x%04x (scid 0x%04x)' % (psm, scid))
+        self.signal(0x02, struct.pack('<HH', psm, scid))
+        return scid
+
+    def on_signal(self, pdu):
+        while len(pdu) >= 4:
+            code, ident, ln = struct.unpack_from('<BBH', pdu)
+            d, pdu = pdu[4:4 + ln], pdu[4 + ln:]
+            if code == 0x0a:                                    # information request
+                itype = struct.unpack_from('<H', d)[0]
+                if itype == 2:
+                    rsp = struct.pack('<HH', 2, 0) + struct.pack('<I', 0x000002b8)
+                elif itype == 3:
+                    rsp = struct.pack('<HH', 3, 0) + bytes([0x86, 0, 0, 0, 0, 0, 0, 0])
+                else:
+                    rsp = struct.pack('<HH', itype, 1)
+                self.send_l2cap(1, struct.pack('<BBH', 0x0b, ident, len(rsp)) + rsp)
+            elif code == 0x0b:                                  # information response
+                self.say('L2CAP info rsp %s' % d.hex())
+            elif code == 0x03:                                  # connection response
+                dcid, scid, result, status = struct.unpack_from('<HHHH', d)
+                ch = self.channels.get(scid)
+                self.say('L2CAP connection rsp dcid 0x%04x scid 0x%04x result %d status %d' % (dcid, scid, result, status))
+                if ch and result == 0:
+                    ch['dcid'] = dcid
+                    # Configure: MTU 1021
+                    self.signal(0x04, struct.pack('<HH', dcid, 0) + bytes([0x01, 2]) + struct.pack('<H', 1021))
+                elif ch and result != 1:
+                    self.say('L2CAP connection to PSM 0x%04x refused' % ch['psm'])
+            elif code == 0x04:                                  # configuration request (from glasses)
+                dcid, flags = struct.unpack_from('<HH', d)
+                ch = self.channels.get(dcid)
+                rsp = struct.pack('<HHH', ch['dcid'] if ch else 0, 0, 0) + d[4:]
+                self.send_l2cap(1, struct.pack('<BBH', 0x05, ident, len(rsp)) + rsp)
+                if ch:
+                    ch['conf_in'] = True
+                    self.check_open(dcid)
+            elif code == 0x05:                                  # configuration response
+                scid, flags, result = struct.unpack_from('<HHH', d)
+                ch = self.channels.get(scid)
+                self.say('L2CAP config rsp scid 0x%04x result %d' % (scid, result))
+                if ch:
+                    ch['conf_out'] = True
+                    self.check_open(scid)
+            elif code == 0x06:                                  # disconnection request
+                dcid, scid = struct.unpack_from('<HH', d)
+                self.send_l2cap(1, struct.pack('<BBHHH', 0x07, ident, 4, dcid, scid))
+                self.channels.pop(dcid, None)
+            elif code == 0x07:                                  # disconnection response
+                pass
+            elif code == 0x08:                                  # echo request
+                self.send_l2cap(1, struct.pack('<BBH', 0x09, ident, len(d)) + d)
+            elif code == 0x02:                                  # connection request from the glasses
+                psm, scid = struct.unpack_from('<HH', d)
+                self.say('L2CAP connection req from glasses PSM 0x%04x' % psm)
+                self.send_l2cap(1, struct.pack('<BBHHHHH', 0x03, ident, 8, 0, scid, 0x0002, 0))
+            else:
+                self.say('L2CAP signal code 0x%02x %s' % (code, d.hex()))
+
+    def check_open(self, scid):
+        ch = self.channels[scid]
+        if ch['conf_in'] and ch['conf_out'] and not ch['open']:
+            ch['open'] = True
+            self.say('L2CAP channel 0x%04x (PSM 0x%04x) open' % (scid, ch['psm']))
+            ch['on_open'](scid)
+
+    def send_chan(self, scid, payload):
+        self.send_l2cap(self.channels[scid]['dcid'], payload)
+
+    # ---- profile bring-up after the link is set up --------------------------------------------
+    def start_profiles(self):
+        self.signal(0x0a, struct.pack('<H', 2))                 # extended features
+        self.sdp_cid = self.connect_psm(0x0001, self.on_sdp, self.sdp_query)
+
+    # SDP client (Vol 3 Part B): ServiceSearchAttributeRequest for the rnlink SPP service.
+    RNLINK_UUID = bytes.fromhex('99999999999999999999999999999999')
+
+    def sdp_query(self, scid):
+        pattern = bytes([0x35, 17, 0x1c]) + self.RNLINK_UUID
+        attrs = bytes([0x35, 5, 0x0a, 0x00, 0x00, 0xff, 0xff])
+        req = struct.pack('>HH', 1, len(pattern) + 2 + len(attrs) + 1)
+        body = pattern + struct.pack('>H', 0x0400) + attrs + b'\0'
+        self.say('SDP -> ServiceSearchAttributeRequest (rnlink SPP UUID)')
+        self.send_chan(scid, bytes([0x06]) + struct.pack('>HH', 1, len(body)) + body)
+
+    def on_sdp(self, pdu):
+        self.say('SDP <- %s' % pdu.hex())
+        if pdu and pdu[0] == 0x07:
+            # Find the RFCOMM channel: protocol descriptor UUID 0x0003 followed by uint8 channel.
+            i = pdu.find(bytes([0x19, 0x00, 0x03, 0x08]))
+            if i >= 0:
+                self.rfcomm_channel = pdu[i + 4]
+                self.say('SDP: rnlink SPP on RFCOMM channel %d' % self.rfcomm_channel)
+                self.signal(0x06, struct.pack('<HH', self.channels[self.sdp_cid]['dcid'], self.sdp_cid))
+                self.channels.pop(self.sdp_cid, None)
+                self.rfcomm_cid = self.connect_psm(0x0003, self.on_rfcomm, self.rfcomm_open)
+
+    # ---- RFCOMM (TS 07.10 subset + Bluetooth credit-based flow control), the phone initiates ----
+    @staticmethod
+    def _fcs(data):
+        crc = 0xff
+        for b in data:
+            crc ^= b
+            for _ in range(8):
+                crc = (crc >> 1) ^ 0xe0 if crc & 1 else crc >> 1
+        return 0xff - crc
+
+    def rfcomm_frame(self, dlci, ctrl, payload=b'', cr=1, credits=None):
+        addr = (dlci << 2) | (cr << 1) | 1
+        if credits is not None:
+            ctrl |= 0x10                                            # P/F: a credit byte follows
+        ln = len(payload)
+        lenb = bytes([(ln << 1) | 1]) if ln < 128 else struct.pack('<H', ln << 1)
+        body = bytes([addr, ctrl]) + lenb + (bytes([credits]) if credits is not None else b'') + payload
+        fcs = self._fcs(bytes([addr, ctrl]) if (ctrl & 0xef) == 0xef else bytes([addr, ctrl]) + lenb)
+        return body + bytes([fcs])
+
+    def rfcomm_send(self, frame):
+        self.send_chan(self.rfcomm_cid, frame)
+
+    def rfcomm_open(self, scid):
+        self.say('RFCOMM -> SABM DLCI 0')
+        self.rfcomm_send(self.rfcomm_frame(0, 0x3f))                # SABM, P=1
+
+    def mux(self, mtype, data, cr=1):
+        # Multiplexer control command on DLCI 0: type byte, length byte, values.
+        return self.rfcomm_frame(0, 0xef, bytes([(mtype << 2) | (cr << 1) | 1, (len(data) << 1) | 1]) + data)
+
+    def on_rfcomm(self, pdu):
+        addr, ctrl = pdu[0], pdu[1] & 0xef
+        dlci = addr >> 2
+        i = 2
+        ln = pdu[i] >> 1
+        if pdu[i] & 1 == 0:
+            ln = (pdu[i] | pdu[i + 1] << 8) >> 1
+            i += 1
+        i += 1
+        credits = 0
+        if ctrl == 0xef and pdu[1] & 0x10 and dlci != 0:
+            credits = pdu[i]
+            i += 1
+        data = pdu[i:i + ln]
+        if ctrl == 0x63:                                            # UA
+            self.say('RFCOMM <- UA DLCI %d' % dlci)
+            if dlci == 0:
+                self.dlci = self.rfcomm_channel << 1
+                # PN: DLCI, CL=0xF (credit flow), priority 7, T1 0, N1 (max frame) 1000, NA 0, credits 7
+                pn = bytes([self.dlci, 0xf0, 7, 0]) + struct.pack('<H', 1000) + bytes([0, 7])
+                self.say('RFCOMM -> PN DLCI %d' % self.dlci)
+                self.rfcomm_send(self.mux(0x20, pn))
+            elif dlci == self.dlci:
+                self.say('RFCOMM -> MSC DLCI %d' % dlci)
+                self.rfcomm_send(self.mux(0x38, bytes([(dlci << 2) | 3, 0x8d])))
+        elif ctrl == 0x0f:                                          # DM
+            self.say('RFCOMM <- DM DLCI %d (refused)' % dlci)
+        elif ctrl == 0x2f:                                          # SABM from the glasses
+            self.rfcomm_send(self.rfcomm_frame(dlci, 0x73, cr=1))
+        elif ctrl == 0x43:                                          # DISC
+            self.say('RFCOMM <- DISC DLCI %d' % dlci)
+            self.rfcomm_send(self.rfcomm_frame(dlci, 0x73, cr=1))
+        elif ctrl == 0xef and dlci == 0:
+            self.on_mux(data)
+        elif ctrl == 0xef:
+            self.tx_credits = getattr(self, 'tx_credits', 0) + credits
+            if data:
+                self.rx_credits_used = getattr(self, 'rx_credits_used', 0) + 1
+                self.on_spp(data)
+            self.spp_flush()
+
+    def on_mux(self, data):
+        mtype, cr = data[0] >> 2, (data[0] >> 1) & 1
+        vals = data[2:2 + (data[1] >> 1)]
+        if mtype == 0x20 and not cr:                                # PN response
+            self.tx_credits = vals[7]
+            self.say('RFCOMM <- PN rsp: frame %d credits %d' % (struct.unpack_from('<H', vals, 4)[0], vals[7]))
+            self.say('RFCOMM -> SABM DLCI %d (SPP channel %d)' % (self.dlci, self.rfcomm_channel))
+            self.rfcomm_send(self.rfcomm_frame(self.dlci, 0x3f))
+        elif mtype == 0x38 and cr:                                  # MSC command from the glasses
+            self.rfcomm_send(self.mux(0x38, vals, cr=0))
+            if not getattr(self, 'spp_up', False):
+                self.spp_up = True
+                self.say('SPP (RFCOMM channel %d) open: starting rnlink over classic BT' % self.rfcomm_channel)
+                # Give the glasses plenty of credits, then run the phone-side rnlink over this channel.
+                self.rfcomm_send(self.rfcomm_frame(self.dlci, 0xef, b'', credits=60))
+                if self.on_spp_open:
+                    self.on_spp_open(self)
+        elif mtype == 0x38 and not cr:
+            pass                                                    # MSC response
+        elif cr:
+            self.say('RFCOMM mux cmd 0x%02x %s (answered)' % (mtype, vals.hex()))
+            self.rfcomm_send(self.mux(mtype, vals, cr=0))
+
+    def spp_write(self, raw):
+        self.spp_out = getattr(self, 'spp_out', b'') + raw
+        self.spp_flush()
+
+    def spp_flush(self):
+        while getattr(self, 'spp_out', b'') and getattr(self, 'tx_credits', 0) > 0:
+            chunk, self.spp_out = self.spp_out[:900], self.spp_out[900:]
+            self.tx_credits -= 1
+            give = None
+            if getattr(self, 'rx_credits_used', 0) >= 20:
+                give, self.rx_credits_used = self.rx_credits_used, 0
+            self.rfcomm_send(self.rfcomm_frame(self.dlci, 0xef, chunk, credits=give))
+
+    def on_spp(self, data):
+        if self.on_spp_data:
+            self.on_spp_data(data)
+        if getattr(self, 'rx_credits_used', 0) >= 20 and not getattr(self, 'spp_out', b''):
+            self.rfcomm_send(self.rfcomm_frame(self.dlci, 0xef, b'', credits=self.rx_credits_used))
+            self.rx_credits_used = 0
 
 
-if __name__ == '__main__':
-    # GIAC LAP 0x9E8B33 -> sync word 0x475C58CC73345E72 (spec sample data).
-    sw = sync_word(0x9E8B33)
-    print(hex(sw), 'OK' if sw == 0x475C58CC73345E72 else 'MISMATCH')

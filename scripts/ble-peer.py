@@ -55,7 +55,7 @@ class Central:
 
     # ---- advertising -------------------------------------------------------------------------
     def on_adv(self, cs, fmt, adva, pdus):
-        if self.connected_cs is not None:
+        if self.connected_cs is not None or os.environ.get('BLE_OFF'):
             return 'NONE'
         for p in pdus:
             hdr, data = p.split(':')
@@ -331,6 +331,37 @@ class Central:
         self.pending_att = True
 
 
+class SppLink:
+    """rnlink over the classic SPP channel (Android phones): a byte stream of aa55 frames."""
+    def __init__(self, c, phone):
+        self.c, self.phone, self.buf = c, phone, b''
+        self.glasses_addr = c.glasses_addr if getattr(c, 'glasses_addr', None) else bytes.fromhex('554433221100')
+        self.rn = rnlink.RnlinkPhone(c.say, phone.spp_write, self)
+        c.say('rnlink over SPP: starting handshake')
+        self.rn.start()
+
+    def on_data(self, data):
+        self.buf += data
+        while len(self.buf) >= 6:
+            i = self.buf.find(b'\xaa\x55')
+            if i < 0:
+                self.buf = b''; return
+            self.buf = self.buf[i:]
+            total = ((self.buf[2] << 8) | self.buf[3]) + 6
+            if len(self.buf) < total:
+                return
+            frame, self.buf = self.buf[:total], self.buf[total:]
+            self.rn.on_frame(frame)
+
+
+def spp_attach(c):
+    def opened(phone):
+        c.spp = SppLink(c, phone)
+        phone.on_spp_data = c.spp.on_data
+        phone.on_tick = c.spp.rn.on_tick
+    c.bredr.on_spp_open = opened
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--port', type=int, default=23600)
@@ -344,14 +375,14 @@ def main():
     srv.listen(1)
     c = Central(log)
     c.rn = rnlink.RnlinkPhone(c.say, c.rnlink_send, c)
-    c.bredr = bredr.ClassicPhone(c.say)
+    c.bredr = bredr.ClassicPhone(c.say); spp_attach(c)
     c.say('waiting for the emulator on port %d' % a.port)
     # Re-accept across reconnects: a dropped model connection (or a stray probe) must not kill us.
     while True:
         conn, _ = srv.accept()
         f = conn.makefile('rw', newline='\n')
         c.__init__(log); c.rn = rnlink.RnlinkPhone(c.say, c.rnlink_send, c)   # fresh per model session
-        c.bredr = bredr.ClassicPhone(c.say)
+        c.bredr = bredr.ClassicPhone(c.say); spp_attach(c)
         c.log_raw = a.raw
         c.say('emulator connected')
         for line in f:
