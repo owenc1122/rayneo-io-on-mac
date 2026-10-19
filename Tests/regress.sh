@@ -86,6 +86,7 @@ phone prompter 48 bt-prompter.txt PROMPT_DEMO=1
 phone ota 60 bt-ota.txt OTA_DIR="$fw" OTA_FILES=smf.json
 phone_classic weatherbt 135 bt-classic-weather.txt
 phone_classic hfpcall 135 bt-classic-hfp.txt HFP_CALL=1 CALL_DEMO=1
+phone_classic scocall 135 bt-classic-sco.txt HFP_CALL=1 CALL_DEMO=1 SCO_AUDIO=1
 for p in $jobs_pids; do wait "$p"; done
 kill $peer_pids 2>/dev/null
 fi
@@ -136,6 +137,14 @@ check "hfpcall: HFP service-level connection + RING over classic BT" "grep -q 'H
 check "hfpcall: glasses recognise the incoming call (+15550123)" "[ \$(n hfpcall 'number:+15550123') -gt 0 ]"
 check "hfpcall: incoming-call UI shown on screen" "[ \$(n hfpcall 'showNotification - UID: call1') -gt 0 ]"
 check "hfpcall: call frame captured while connected" "[ \$(shots hfpcall) -ge 1 ]"
+# scocall: HFP call with downlink SCO voice. The controller's SCO radio model keeps the link controller's
+# eSCO cycle running (no desync/assert) and the downlink audio reaches the DSP (scodn) and the speaker.
+check "scocall: no firmware assert" "[ \$(n scocall 'dump_assert_info: Assert') -eq 0 ]"
+check "scocall: eSCO link up on the controller (sco start sync)" "[ \$(n scocall 'sco start sync') -gt 0 ]"
+check "scocall: SCO link controller serviced the whole call (ACL ring alive)" "[ \$(n scocall 'classic RX ring full') -gt 1000 ]"
+check "scocall: downlink SCO decoded to the speaker (scodn)" "[ \$(n scocall 'AP -> scodn frame') -gt 0 ]"
+check "scocall: speaker audio non-silent during the call" "python3 scripts/check-audio.py '$out/scocall' 2>&1 | grep -oE 'peak [0-9]+' | awk '{exit (\$2>1000)?0:1}'"
+check "scocall: incoming-call UI shown on screen" "[ \$(n scocall 'showNotification - UID: call1') -gt 0 ]"
 check "subtitle: caption rendered (TranslationTextUpdate)" "[ \$(n subtitle 'onAction - TranslationTextUpdate') -gt 0 ]"
 check "notification: banner shown on screen" "[ \$(n notification 'Notification layer shown') -gt 0 ]"
 check "assistant: answer card rendered (ChatDomain)" "[ \$(n assistant 'ChatDomain::onMessageReceived') -gt 0 ]"

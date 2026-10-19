@@ -1,4 +1,9 @@
-# Classic-BT HFP call with SCO audio: boot (SPP up), phone opens SLC, in-band ring opens eSCO.
-btcRadio TraceEvents true
-emulation RunFor "26"
+# Classic-BT HFP call with SCO downlink audio: boot (SPP up), the phone AG opens the SLC and raises an
+# incoming call, in-band ring brings up the (e)SCO link; the controller's SCO radio model delivers the
+# downlink voice to the glasses' ScoService (-> scodn -> HiFi4 decode -> speaker). Wake the screen and
+# capture the call UI mid-call, then keep running so the SCO audio plays out.
+emulation RunFor "20"
+gpio0 Pulse 1 false 120
+emulation RunFor "3"
 lcdc SaveFrame @OUT/shot-sco.pgm
+emulation RunFor "10"

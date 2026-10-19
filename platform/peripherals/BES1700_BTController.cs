@@ -61,7 +61,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         public override void WriteDoubleWord(long offset,uint value) {
             ulong now=Now;                     // clock read BEFORE sync (see Tick for the lock order)
-            ulong next=ulong.MaxValue; bool irq;
+            ulong next=ulong.MaxValue; bool irq; bool scoCheck=false;
             lock(sync) {
             // Stock controller initialization requests bit 31 then waits for it to clear.
             // Reset the digital control/interrupt state synchronously; preserve RF setup.
@@ -98,6 +98,13 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     case 0x110:
                         if((value&0x80000000u)!=0 && exchangeTable!=0) Program(now,(int)(value&0xf));
                         break;
+                    // SCO (eSCO voice) HW programming: the LC writes the per-link SCO buffer pointers
+                    // (0x618/0x638 RX, 0x61c/0x63c TX), the SCO ctrl (0x624/0x644) and enables SCO via
+                    // 0x4d4 bit 0x10000. Any of these may (de)activate the SCO radio model below.
+                    case 0x4d0: case 0x4d4:
+                    case 0x618: case 0x61c: case 0x624:
+                    case 0x638: case 0x63c: case 0x644:
+                        scoCheck=true; break;
                 }
                 next=Process(now);
             }
@@ -105,6 +112,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             }
             Schedule(now,next);
             IRQ.Set(irq);
+            if(scoCheck) ScoUpdate();       // enable/disable the SCO pump outside lock(sync)
         }
         // Core IP versions the BTC init asserts on the radio block: +0x404 = 0x0B000600, +0x804 = 0x0B001200.
         public override uint ReadDoubleWord(long offset) {
@@ -373,6 +381,86 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private int clRxIdx;
         private const ulong ClCsBase=0x6d02eaa8, ClRxDesc=0x6d02efd0, ClTxDesc=0x6d02f048;
         private const int ClRxCount=5;
+
+        // ---- SCO (HFP eSCO voice) radio model --------------------------------------------------
+        // An HFP call brings up an (e)SCO link (bredr sends LMP_eSCO_link_req; the LC accepts and runs
+        // "sco start sync"). The LC then programs the SCO HW (btc.c FUN_604222c4): per SCO link i it
+        // writes the ping-pong RX/TX audio buffer pointers to 0x618+i*0x20 (RX) / 0x61c+i*0x20 (TX) and
+        // enables SCO via 0x4d4 |= 0x10000. Each half-pointer is a 16-bit field (RX reg = high<<16|low)
+        // holding (byteOffsetFromExchangeMemBase >> 3); the two halves (0x40 B apart) are the double
+        // buffer the radio fills on alternate eSCO intervals.
+        //
+        // On real silicon the radio, every T_eSCO (12 slots = 7.5 ms), DMAs one received 60-byte SCO
+        // frame into the current RX buffer half, latches that half's RX status in 0x614 (bits [17:16]
+        // for half A, [19:18] for half B; 0 = received OK, 1/2 = error/no-sync) and the ping-pong select
+        // in 0x610 bit 31, then raises the radio frame interrupt the LC already services. Its SCO slot
+        // handler (FUN_60430864) reads the half, forwards the payload to the host core over intersys,
+        // and the host forwards it to the AP's ScoService (-> scodn -> HiFi4 decode -> speaker).
+        //
+        // Without a radio the emulator never delivers an SCO frame, so the LC's handler sees a permanent
+        // error status, runs its retransmit/flush path and after ~16 intervals stops scheduling SCO ->
+        // the host HCI/SCO flow desyncs and asserts ~7.5 s in. This models the radio delivery directly:
+        // off the controller clock, every T_eSCO we write ScoFrame() into both RX halves and clear the
+        // RX status to "received OK", so the real firmware pipeline runs end to end (no AP-side inject).
+        // ScoFrame supplies the 60-byte transparent-air payload (BES1700_ScoCall encodes the far end);
+        // ScoUplink, if set, is handed each 60-byte TX (uplink) frame the LC queued.
+        public Func<byte[]> ScoFrame { get; set; }
+        public Action<byte[]> ScoUplink { get; set; }
+        // Delivers each downlink frame onward to the AP's ScoService over intersys ch3 (wired to
+        // BES1700_ClockControl.ScoToAp): the controller->AP SCO transport the glasses' audio rides.
+        public Action<byte[]> ScoToAp { get; set; }
+        private LimitTimer scoPump;
+        private bool scoPing;
+        private const ulong ScoEmBase=0x6d020000;          // SCO buffer offsets are relative to here
+        private const ulong ScoInterval=7500;              // T_eSCO = 12 slots = 7.5 ms, in microseconds
+        // Called (outside lock(sync)) when a SCO HW register changes: (de)activate the eSCO frame pump.
+        private void ScoUpdate() {
+            // SCO is active once the LC has programmed a non-zero RX audio-buffer pointer (0x618); the
+            // teardown path zeroes it. (0x4d4 bit 0x10000 is the HW enable, but the LC programs the
+            // buffers and the enable through code paths that may bypass this register bank, so the
+            // buffer pointer is the reliable, SCO-only signal.)
+            bool on;
+            lock(sync) on=base.ReadDoubleWord(0x618)!=0;
+            if(on && scoPump==null) {
+                scoPump=new LimitTimer(machine.ClockSource,1000000UL,this,"scoPump",ScoInterval,
+                    direction:Direction.Ascending,workMode:WorkMode.Periodic,enabled:false,eventEnabled:true);
+                scoPump.LimitReached+=ScoTick;
+            }
+            if(scoPump!=null && scoPump.Enabled!=on) {
+                scoPump.Enabled=on;
+                if(TraceEvents) this.Log(LogLevel.Info,"SCO pump {0}",on?"started":"stopped");
+            }
+        }
+        // One eSCO interval: deliver a downlink frame and consume the uplink. Pure data work (register
+        // bank + exchange-memory backing store); never touches the clock/alarm/NVIC, so it is safe on
+        // the pump thread under lock(sync) (same discipline as the air bridge).
+        private void ScoTick() {
+            byte[] frame=null; var src=ScoFrame;
+            if(src!=null) { try { frame=src(); } catch(Exception e) { this.Log(LogLevel.Warning,"SCO frame source: {0}",e.Message); } }
+            lock(sync) {
+                uint rx=base.ReadDoubleWord(0x618), tx=base.ReadDoubleWord(0x61c);
+                ulong rxHi=ScoEmBase+(ulong)((rx>>16)&0xffff)*8, rxLo=ScoEmBase+(ulong)(rx&0xffff)*8;
+                if(frame!=null)
+                    // Write the frame into both ping-pong halves (the handler reads only the current
+                    // one; the next interval overwrites it with the following frame).
+                    for(int i=0;i<60;i++){ byte b=i<frame.Length?frame[i]:(byte)0; EmWB(rxHi+(ulong)i,b); EmWB(rxLo+(ulong)i,b); }
+                scoPing=!scoPing;
+                uint r610=base.ReadDoubleWord(0x610);
+                base.WriteDoubleWord(0x610,scoPing ? r610|0x80000000u : r610&0x7fffffffu);
+                base.WriteDoubleWord(0x614,base.ReadDoubleWord(0x614)&~0xf0000u);   // both halves: RX OK
+                // Consume the uplink (mic) SCO the LC queued in the TX buffer, so the handler keeps flowing.
+                var up=ScoUplink;
+                if(up!=null && tx!=0) {
+                    ulong txCur=ScoEmBase+(ulong)((scoPing ? tx>>16 : tx)&0xffff)*8;
+                    var u=new byte[60]; for(int i=0;i<60;i++) u[i]=EmRB(txCur+(ulong)i);
+                    try { up(u); } catch {}
+                }
+            }
+            // Forward the downlink frame to the AP's ScoService (ch3) outside lock(sync): ScoToAp takes
+            // the clock controller's IPC lock and drives the AP NVIC, which must never be done under sync.
+            var deliver=ScoToAp;
+            if(deliver!=null && frame!=null) { try { deliver(frame); } catch(Exception e) { this.Log(LogLevel.Warning,"SCO deliver: {0}",e.Message); } }
+        }
         private string BdAddr(ulong cs) { var sb=new System.Text.StringBuilder();
             for(ulong i=0;i<6;i++) sb.AppendFormat("{0:x2}",EmRB(cs+0x8+i));
             return sb.ToString();

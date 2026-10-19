@@ -337,8 +337,9 @@ headMotion: Miscellaneous.BES1700_HeadMotion @ sysbus 0x7ff00000
     imu: bthImu
 
 // HFP call downlink SCO audio source (not hardware; unused window). Supplies one 60-byte eSCO frame
-// per 7.5 ms to sysCmu's intersys ch3 SCO path during a call. See BES1700_ScoCall.cs.
+// per 7.5 ms to the BT controller's SCO radio model during a call. See BES1700_ScoCall.cs.
 scoCall: Miscellaneous.BES1700_ScoCall @ sysbus 0x7ff01000
+    radio: btcRadio
     clock: sysCmu
 
 // Magnetometer (mmc5603nj_init on the BTH, product ID 0x10): BTH I2C port 1 (dev+0x1c), address 0x30, same bus as the IMU.

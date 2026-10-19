@@ -1,6 +1,6 @@
 // Stand-in for the far-end (phone) voice on an HFP call's downlink SCO link. The real glasses would
-// receive 60-byte eSCO frames off the air every 7.5 ms; here BES1700_ClockControl's ch3 SCO path pulls
-// one frame per eSCO slot from this generator (it is wired as sysCmu.ScoDownlink in the constructor).
+// receive 60-byte eSCO frames off the air every 7.5 ms; here BES1700_BTController's SCO radio model
+// pulls one frame per eSCO interval from this generator (wired as btcRadio.ScoFrame in the constructor).
 // It synthesises an obviously non-silent "ring-back" tone (the 440 Hz / 480 Hz North-American
 // call-progress pair, 2 s on / 1 s off) at 16 kHz, encodes it with the same MsbcCodec the DSP decodes,
 // and wraps it as the on-wire mSBC eSCO packet: 0x01, an H2 sequence byte (08/38/C8/F8), the 57-byte
@@ -17,10 +17,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 {
     public sealed class BES1700_ScoCall : IDoubleWordPeripheral, IKnownSize
     {
-        public BES1700_ScoCall(IMachine machine, BES1700_ClockControl clock, bool wideBand = true)
+        public BES1700_ScoCall(IMachine machine, BES1700_BTController radio, BES1700_ClockControl clock, bool wideBand = true)
         {
             this.wideBand = wideBand;
-            clock.ScoDownlink = Next;
+            radio.ScoFrame = Next;              // the SCO radio model pulls one 60-byte frame per eSCO interval
+            radio.ScoToAp = clock.ScoToAp;      // ... and forwards it to the AP's ScoService over intersys ch3
         }
         public long Size => 0x100;
         public uint ReadDoubleWord(long offset) => 0;
