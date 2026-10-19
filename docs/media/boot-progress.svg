@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#15181D"/><stop offset="1" stop-color="#07080A"/></linearGradient>
+<pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#FFFFFF" stroke-opacity=".03"/></pattern></defs>
+<rect width="1200" height="600" rx="24" fill="url(#bg)"/><rect width="1200" height="600" rx="24" fill="url(#grid)"/>
+<text x="56" y="76" font-size="30" font-weight="700" fill="#FFFFFF" letter-spacing="-0.5">How far the emulated glasses get today</text>
+<text x="56" y="108" font-size="17" fill="#9AA1AC">Unmodified stock firmware on the emulated BES1700 board. Every step is observed, not assumed.</text>
+<path d="M120 200 H1080" stroke="#22E05A" stroke-width="4" stroke-opacity=".55"/>
+<path d="M1080 200 H1130 Q1150 200 1150 220 V380 Q1150 400 1130 400 H1080" stroke="#22E05A" stroke-width="4" stroke-opacity=".55" fill="none"/>
+<path d="M1080 400 H120" stroke="#5B626D" stroke-width="3" stroke-dasharray="6 6" fill="none"/>
+<circle cx="120" cy="200" r="15" fill="#22E05A"/><path d="M114 200 l4 4.5 l8 -9" stroke="#07140B" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="120" y="246" text-anchor="middle" font-size="16" font-weight="600" fill="#E8EBF0">Four cores boot</text>
+<text x="120" y="268" text-anchor="middle" font-size="13" fill="#8A919C">AP · M55C1 · BTH · BTC</text>
+<circle cx="312" cy="200" r="15" fill="#22E05A"/><path d="M306 200 l4 4.5 l8 -9" stroke="#07140B" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="312" y="246" text-anchor="middle" font-size="16" font-weight="600" fill="#E8EBF0">Storage &amp; fonts</text>
+<text x="312" y="268" text-anchor="middle" font-size="13" fill="#8A919C">NAND resources, 18 fonts</text>
+<circle cx="504" cy="200" r="15" fill="#22E05A"/><path d="M498 200 l4 4.5 l8 -9" stroke="#07140B" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="504" y="246" text-anchor="middle" font-size="16" font-weight="600" fill="#E8EBF0">Home screen</text>
+<text x="504" y="268" text-anchor="middle" font-size="13" fill="#8A919C">stock launcher, clock,</text>
+<text x="504" y="286" text-anchor="middle" font-size="13" fill="#8A919C">battery</text>
+<circle cx="696" cy="200" r="15" fill="#22E05A"/><path d="M690 200 l4 4.5 l8 -9" stroke="#07140B" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="696" y="246" text-anchor="middle" font-size="16" font-weight="600" fill="#E8EBF0">Crown input</text>
+<text x="696" y="268" text-anchor="middle" font-size="13" fill="#8A919C">press · long · rotate</text>
+<circle cx="888" cy="200" r="15" fill="#22E05A"/><path d="M882 200 l4 4.5 l8 -9" stroke="#07140B" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="888" y="246" text-anchor="middle" font-size="16" font-weight="600" fill="#E8EBF0">Saved state</text>
+<text x="888" y="268" text-anchor="middle" font-size="13" fill="#8A919C">NOR + NAND kept</text>
+<circle cx="1080" cy="200" r="15" fill="#22E05A"/><path d="M1074 200 l4 4.5 l8 -9" stroke="#07140B" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="1080" y="246" text-anchor="middle" font-size="16" font-weight="600" fill="#E8EBF0">BLE link</text>
+<text x="1080" y="268" text-anchor="middle" font-size="13" fill="#8A919C">virtual phone connects</text>
+<circle cx="1080" cy="400" r="22" fill="#FFA42E" fill-opacity=".14"/><circle cx="1080" cy="400" r="15" fill="none" stroke="#FFA42E" stroke-width="3"/><circle cx="1080" cy="400" r="6" fill="#FFA42E"/>
+<text x="1080" y="446" text-anchor="middle" font-size="16" font-weight="600" fill="#E8EBF0">Phone features</text>
+<text x="1080" y="468" text-anchor="middle" font-size="13" fill="#8A919C">rnlink phone side,</text>
+<text x="1080" y="486" text-anchor="middle" font-size="13" fill="#8A919C">classic BT</text>
+<circle cx="840" cy="400" r="22" fill="#FFA42E" fill-opacity=".14"/><circle cx="840" cy="400" r="15" fill="none" stroke="#FFA42E" stroke-width="3"/><circle cx="840" cy="400" r="6" fill="#FFA42E"/>
+<text x="840" y="446" text-anchor="middle" font-size="16" font-weight="600" fill="#E8EBF0">Wake word</text>
+<text x="840" y="468" text-anchor="middle" font-size="13" fill="#8A919C">audio in/out works;</text>
+<text x="840" y="486" text-anchor="middle" font-size="13" fill="#8A919C">KWS, noise suppression</text>
+<circle cx="600" cy="400" r="15" fill="#0E1014" stroke="#5B626D" stroke-width="2.5" stroke-dasharray="4 3"/>
+<text x="600" y="446" text-anchor="middle" font-size="16" font-weight="600" fill="#9AA1AC">Head motion</text>
+<text x="600" y="468" text-anchor="middle" font-size="13" fill="#8A919C">IMU from the Mac,</text>
+<text x="600" y="486" text-anchor="middle" font-size="13" fill="#8A919C">light &amp; wear sensors</text>
+<circle cx="360" cy="400" r="15" fill="#0E1014" stroke="#5B626D" stroke-width="2.5" stroke-dasharray="4 3"/>
+<text x="360" y="446" text-anchor="middle" font-size="16" font-weight="600" fill="#9AA1AC">Real-time speed</text>
+<text x="360" y="468" text-anchor="middle" font-size="13" fill="#8A919C">now about 1/8</text>
+<circle cx="120" cy="400" r="15" fill="#0E1014" stroke="#5B626D" stroke-width="2.5" stroke-dasharray="4 3"/>
+<text x="120" y="446" text-anchor="middle" font-size="16" font-weight="600" fill="#9AA1AC">Signed app</text>
+<text x="120" y="468" text-anchor="middle" font-size="13" fill="#8A919C">notarized bundle</text>
+<rect x="780" y="322" width="360" height="30" rx="15" fill="#FFA42E" fill-opacity=".12" stroke="#FFA42E" stroke-opacity=".55"/>
+<text x="960" y="342" text-anchor="middle" font-size="14" font-weight="600" fill="#FFB85C">Being worked on now</text>
+<circle cx="64" cy="548" r="7" fill="#22E05A"/><text x="80" y="553" font-size="14" fill="#C9CED6">Working on the emulator</text>
+<circle cx="290" cy="548" r="7" fill="none" stroke="#FFA42E" stroke-width="2.5"/><text x="306" y="553" font-size="14" fill="#C9CED6">In progress</text>
+<circle cx="430" cy="548" r="7" fill="none" stroke="#5B626D" stroke-width="2" stroke-dasharray="3 2"/><text x="446" y="553" font-size="14" fill="#C9CED6">Not started</text>
+<text x="1144" y="553" text-anchor="end" font-size="13" fill="#6B727D">Details: docs/DEV-NOTES.md</text>
+</svg>

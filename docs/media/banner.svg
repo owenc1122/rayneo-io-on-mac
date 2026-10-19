@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#15181D"/><stop offset="1" stop-color="#07080A"/></linearGradient>
+<radialGradient id="glow" cx="0.2" cy="0.5" r="0.45"><stop offset="0" stop-color="#22E05A" stop-opacity=".16"/><stop offset="1" stop-color="#22E05A" stop-opacity="0"/></radialGradient>
+<linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7A818C"/><stop offset="1" stop-color="#2C3036"/></linearGradient>
+<linearGradient id="lens" x1="0" y1="0" x2="0.6" y2="1"><stop offset="0" stop-color="#10301B"/><stop offset="1" stop-color="#050C07"/></linearGradient>
+<pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#FFFFFF" stroke-opacity=".035"/></pattern>
+</defs>
+<rect width="1280" height="400" rx="24" fill="url(#bg)"/>
+<rect width="1280" height="400" rx="24" fill="url(#grid)"/>
+<rect width="1280" height="400" rx="24" fill="url(#glow)"/>
+<!-- laptop -->
+<g transform="translate(70,82)">
+  <rect x="20" y="0" width="300" height="196" rx="14" fill="#1B1E24" stroke="url(#rim)" stroke-width="5"/>
+  <rect x="38" y="18" width="264" height="160" rx="6" fill="#050607"/>
+  <path d="M0 208 H340 L326 228 H14 Z" fill="#2A2E35"/>
+  <rect x="140" y="208" width="60" height="6" rx="3" fill="#15181D"/>
+  <!-- glasses inside the screen -->
+  <g transform="translate(58,62)">
+    <path d="M-10 26 C2 16 14 16 24 24" fill="none" stroke="url(#rim)" stroke-width="7" stroke-linecap="round"/>
+    <path d="M200 24 C210 16 222 16 234 26" fill="none" stroke="url(#rim)" stroke-width="7" stroke-linecap="round"/>
+    <rect x="22" y="6" width="80" height="58" rx="24" fill="url(#lens)" stroke="url(#rim)" stroke-width="7"/>
+    <rect x="122" y="6" width="80" height="58" rx="24" fill="url(#lens)" stroke="url(#rim)" stroke-width="7"/>
+    <path d="M102 26 Q112 18 122 26" fill="none" stroke="url(#rim)" stroke-width="7"/>
+    <rect x="40" y="30" width="44" height="6" rx="3" fill="#22E05A"/>
+    <rect x="40" y="42" width="28" height="5" rx="2.5" fill="#22E05A" fill-opacity=".5"/>
+    <rect x="140" y="30" width="44" height="6" rx="3" fill="#22E05A"/>
+    <rect x="140" y="42" width="28" height="5" rx="2.5" fill="#22E05A" fill-opacity=".5"/>
+  </g>
+  <text x="54" y="166" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#22E05A" fill-opacity=".8">nsh&gt; _</text>
+</g>
+<g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+<text x="470" y="178" font-size="76" font-weight="700" fill="#FFFFFF" letter-spacing="-1.5">rayneo-io<tspan fill="#22E05A">-on-</tspan>mac</text>
+<text x="474" y="236" font-size="28" fill="#AEB4BE">Boot your own RayNeo iO firmware on a Mac, in Renode</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="600">
+<rect x="474" y="272" width="168" height="38" rx="19" fill="#22E05A" fill-opacity=".10" stroke="#22E05A" stroke-opacity=".45"/><text x="558" y="297" text-anchor="middle" fill="#22E05A">Renode board</text>
+<rect x="656" y="272" width="150" height="38" rx="19" fill="#22E05A" fill-opacity=".10" stroke="#22E05A" stroke-opacity=".45"/><text x="731" y="297" text-anchor="middle" fill="#22E05A">C# models</text>
+<rect x="820" y="272" width="170" height="38" rx="19" fill="#2E8BFF" fill-opacity=".12" stroke="#2E8BFF" stroke-opacity=".5"/><text x="905" y="297" text-anchor="middle" fill="#5AA2FF">Swift viewer</text>
+<rect x="1004" y="272" width="196" height="38" rx="19" fill="#FFA42E" fill-opacity=".10" stroke="#FFA42E" stroke-opacity=".5"/><text x="1102" y="297" text-anchor="middle" fill="#FFB85C">experimental</text>
+</g></g>
+</svg>
