@@ -8,6 +8,7 @@ using Antmicro.Renode.Peripherals.Bus;
 using Antmicro.Renode.Time;
 using Antmicro.Renode.Peripherals.CPU;
 using Antmicro.Renode.Peripherals.Timers;
+using Antmicro.Renode.Peripherals.Memory;
 
 namespace Antmicro.Renode.Peripherals.Miscellaneous
 {
@@ -65,6 +66,11 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                         apRxMask&=~((value>>8)&15);apTxMask&=~((value>>12)&15);
                     }
                 }
+                // The AP arms its intersys ch3 RX mask (hal_intersys_local_irq_mask_set(3,0) writes
+                // bit 11) when its ScoService starts a call and after it consumes each SCO frame. The
+                // real radio delivers one downlink SCO frame per eSCO slot; here the SCO frame source
+                // (ScoDownlink) stands in for that radio path. See ScoArm/ScoTick below.
+                if(offset==0x140 && (value&0x800)!=0) ScoArm();
                 UpdateIPC();return;
             }
             long firstLock = alwaysOn ? 0x100 : 0xc0;
@@ -153,6 +159,82 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private LimitTimer pacer;
         private System.Diagnostics.Stopwatch paceWatch;
         private double paceVirtual;
+
+        // ---- SCO (HFP call) downlink audio over intersys ch3 -----------------------------------
+        // The glasses receive the call's downlink voice as 60-byte eSCO frames every 7.5 ms. On real
+        // silicon the BT radio hands each frame to the controller, which forwards it to the AP over
+        // the AP<->BTC "intersys" channel 3; the AP's ScoService (smf::ScoService, nuttx_ap) copies it
+        // into the DSP's "scodn" FIFO, where BES1700_HiFi4 decodes mSBC/CVSD to the speaker. The eSCO
+        // reserved slots are NOT programmed through the baseband exchange table (only the ACL link and
+        // page/inquiry scans are), so there is no air-bridge activity to carry them; this models the
+        // radio -> controller -> intersys-ch3 delivery directly, which is the hardware path the
+        // firmware's own intersys RX code (hal_intersys_rx_irq_handler / hal_sco_intersys_rx) then
+        // drives unchanged. The AP's per-channel RX state, the message/payload buffers and the ch3
+        // doorbell are the exact structures that handler consumes (addresses resolved from nuttx_ap).
+        //
+        // ScoDownlink supplies each 60-byte frame (ScoCall.cs encodes a tone/voice with MsbcCodec); a
+        // null source holds the line silent. Delivery is paced to virtual time at the 7.5 ms eSCO
+        // interval and gated on the AP having armed ch3 recv (a live call) and acknowledged the
+        // previous frame, so nothing is injected outside a call.
+        public Func<byte[]> ScoDownlink { get; set; }
+        // nuttx_ap intersys globals (apfull Ghidra): rx state ring base DAT_105ba700, ch3 at +0x30.
+        private const ulong ScoStateCh3 = 0x184f68d4 + 3*0x10;   // {next@0, flag@4, len@8, msg@0xc}
+        // Scratch in the AP<->BTC shared SRAM (0x23c00000, 1 MiB), well clear of the intersys buffer
+        // region (~0x23c06838..0x23c0c000): the message struct and the 60-byte RX/TX payload buffers.
+        private const ulong ScoMsg = 0x23c90000, ScoRxBuf = 0x23c90040, ScoTxBuf = 0x23c90080;
+        private LimitTimer scoPump;
+        private ulong scoLastArmUs, scoFirstUs;
+        private bool scoCh3Active;
+        public ulong ScoWindowUs { get; set; }   // >0 limits downlink to that many us of ringback; 0 = unbounded
+        private readonly object scoLock = new object();
+
+        private void ScoArm() {
+            scoLastArmUs = VirtualUs();
+            scoCh3Active = true;
+            if(scoPump == null) {
+                scoPump = new LimitTimer(machine.ClockSource, 1000000UL, this, "scoClock", 7500,
+                    direction: Direction.Ascending, enabled: false, workMode: WorkMode.Periodic, eventEnabled: true);
+                scoPump.LimitReached += ScoTick;
+            }
+            scoPump.Enabled = true;
+        }
+        private void ScoTick() {
+            // The call is live only while the AP keeps re-arming ch3 recv; stop injecting once it stops
+            // (e.g. the call ended) so the pump idles between calls.
+            if(VirtualUs() - scoLastArmUs > 60000) return;
+            // In-band ringback window: deliver downlink audio for the first ScoWindowUs of the call. The
+            // emulator does not yet service the controller's eSCO reserved slots (they bypass the baseband
+            // exchange table), so the real link controller cannot complete its own SCO TX indefinitely;
+            // once the ringback has played, stop feeding downlink so the ACL link keeps being serviced.
+            if(scoFirstUs == 0) scoFirstUs = VirtualUs();
+            if(ScoWindowUs != 0 && VirtualUs() - scoFirstUs > ScoWindowUs) return;
+            lock(ipcLock) { if((btToAp&8)!=0) return; }   // AP has not consumed the previous frame yet
+            var src = ScoDownlink; if(src == null) return;
+            byte[] frame; try { frame = src(); } catch { frame = null; }
+            if(frame == null) return;
+            lock(scoLock) {
+                for(int i=0;i<60;i++) W8(ScoRxBuf+(ulong)i, i<frame.Length ? frame[i] : (byte)0);
+                // message = {rx_buf, tx_buf, len=60 @ byte 8, rx_invalid=0 @ byte 9} (hal_sco_intersys_rx)
+                W32(ScoMsg+0, (uint)ScoRxBuf); W32(ScoMsg+4, (uint)ScoTxBuf); W32(ScoMsg+8, 60);
+                // ch3 RX state the irq handler walks: a single descriptor (next=0 ends the walk),
+                // flag=0 selects the ch3/sub0 callback, len=60, buffer pointer = the message.
+                W32(ScoStateCh3+0, 0); W32(ScoStateCh3+4, 0); W32(ScoStateCh3+8, 60); W32(ScoStateCh3+0xc, (uint)ScoMsg);
+            }
+            lock(ipcLock) { btToAp|=8; apRxMask|=8; }     // ch3 doorbell -> APReceive3
+            UpdateIPC();
+        }
+        private ulong VirtualUs() { return (ulong)(machine.ElapsedVirtualTime.TimeElapsed.TotalSeconds*1e6); }
+        // Direct backing-store writes (never through the sysbus, whose lock a CPU MMIO dispatch also
+        // holds) so a write from the pump thread cannot invert with a CPU access and deadlock.
+        private readonly List<Tuple<ulong,ulong,MappedMemory>> scoMems = new List<Tuple<ulong,ulong,MappedMemory>>();
+        private MappedMemory ScoMemAt(ulong a, out long off) {
+            foreach(var m in scoMems) if(a>=m.Item1 && a<m.Item2) { off=(long)(a-m.Item1); return m.Item3; }
+            var r=machine.SystemBus.WhatIsAt(a); var mem=r.Peripheral as MappedMemory;
+            ulong start=r.RegistrationPoint.Range.StartAddress;
+            scoMems.Add(Tuple.Create(start,start+(ulong)mem.Size,mem)); off=(long)(a-start); return mem;
+        }
+        private void W8(ulong a, byte v) { long o; ScoMemAt(a,out o).WriteByte(o,v); }
+        private void W32(ulong a, uint v) { for(int i=0;i<4;i++) W8(a+(ulong)i,(byte)(v>>(8*i))); }
         // AP and BTC exchange actual shared-memory descriptors. These registers only
         // route request/acknowledgement lines; they never fabricate HCI payloads.
         public uint ReadBluetoothIPC(long offset) {
@@ -256,7 +338,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 }
             }
             for(int i=0;i<4;i++) {
-                c1BtRx[i].Set(levels[24+i]); c1BtTx[i].Set(levels[28+i]);
+                // The model offers each btToAp channel to both the AP and the M55C1 NVICs. Intersys
+                // ch3 carries the downlink SCO frames the AP's ScoService consumes; the SCO doorbell
+                // must not also raise the M55C1 BT stack's ch3 IRQ (it is not the ch3 receiver and
+                // mishandles the frame -> bes_hci_send_data assert), so suppress c1BtRx[3] while the
+                // SCO path is active.
+                c1BtRx[i].Set(levels[24+i] && !(i==3 && scoCh3Active)); c1BtTx[i].Set(levels[28+i]);
                 laneARx[i].Set(levels[i]); laneATx[i].Set(levels[4+i]); laneBRx[i].Set(levels[8+i]); laneBTx[i].Set(levels[12+i]);
                 apRx[i].Set(levels[24+i]); apTx[i].Set(levels[28+i]); btRx[i].Set(levels[32+i]); btTx[i].Set(levels[36+i]);
             }
@@ -331,7 +418,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         private readonly GPIO[] btTx={new GPIO(),new GPIO(),new GPIO(),new GPIO()};
         private readonly object ipcLock=new object();
         private uint apToBt,btToAp,apAck,btAck,apRxMask,apTxMask,btRxMask,btTxMask;
-        public void Reset() { apToBt=btToAp=apAck=btAck=apRxMask=apTxMask=btRxMask=btTxMask=0;apReq=apDone=apMask=bthReq=bthDone=bthMask=0;coreOneMailbox=0;UpdateIPC();registers.Clear(); Array.Clear(locks, 0, locks.Length); counter.Reset(); }
+        public void Reset() { apToBt=btToAp=apAck=btAck=apRxMask=apTxMask=btRxMask=btTxMask=0;apReq=apDone=apMask=bthReq=bthDone=bthMask=0;coreOneMailbox=0;UpdateIPC();registers.Clear(); Array.Clear(locks, 0, locks.Length); counter.Reset(); if(scoPump!=null){scoPump.Enabled=false;} scoLastArmUs=0; scoFirstUs=0; scoCh3Active=false; }
         public uint ChipId { get; set; } = 0x6a4;
         public long Size => 0x1000;
         private readonly bool alwaysOn;

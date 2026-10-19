@@ -1,0 +1,4 @@
+# Classic-BT HFP call with SCO audio: boot (SPP up), phone opens SLC, in-band ring opens eSCO.
+btcRadio TraceEvents true
+emulation RunFor "26"
+lcdc SaveFrame @OUT/shot-sco.pgm
