@@ -40,7 +40,20 @@ sh scripts/emulate.sh /path/to/StrixOS-1.0.4.12 40 .local/runs/ble "$PWD/Tests/s
 ```
 声音（见下文「音频」）：命令行运行时，原固件播放的声音写到输出目录的 `speaker.raw`（48 kHz 立体声 s16le），`MIC=<wav>` 指定录音输入；`python3 scripts/check-audio.py <输出目录> [mic.wav]` 把两者转成 WAV 并给出电平和相关性。Mac 应用直接用 Mac 的麦克风和扬声器（首次会请求麦克风权限）。
 
-应用首次启动会弹窗让你选择固件文件夹，可在「固件」菜单里重新选择或指定字体文件夹。键盘：空格单击、D 双击、L 长按、↑/↓ 或滚轮旋转表冠。生成的闪存/NAND 镜像和日志放在 `~/Library/Application Support/RayNeo io on Mac/runs/`。
+应用首次启动会弹窗让你选择固件文件夹，可在「固件」菜单里重新选择或指定字体文件夹。键盘：空格单击、D 双击、L 长按、↑/↓ 或滚轮旋转表冠；H 进入头部控制（鼠标拖动转头/抬头低头，实时驱动 IMU，`headMotion Look <pitch> <yaw>`），R 回正；⌘S 保存眼镜截图。窗口只显示一个画面（两眼画面相同，取两眼较亮者）；固件息屏时提示按空格唤醒。生成的闪存/NAND 镜像和日志放在 `~/Library/Application Support/RayNeo io on Mac/runs/`，只保留最近 5 次。
+
+启动速度：Renode 的编译缓存默认打开（`COMPILE_CACHE=0` 关闭），外设模型只在源码变化后才重新编译（每次启动省约 7 秒）；应用模式下开机阶段全速运行（`FAST_BOOT=<虚拟秒数>`，默认 12，`0` 关闭），进桌面后再按 Mac 时钟实时运行。关闭窗口即退出应用并保存眼镜状态（先写临时文件、完整后再替换）；Renode 意外退出会自动重启（10 分钟内最多 3 次）。
+
+## 开发者功能（SDK 应用、日志、手机）
+
+雷鸟 Aapp SDK 应用跑在手机的 Aapp Host 里，眼镜画面通过 10002 端口的显示协议画到「电脑模拟器」。本模拟器实现了同一协议（`Sources/RayNeoSimulator/Aapp/`），Host 可以把它当成官方 RTOS Simulator 连接；Aapp 应用打开时取代固件画面，关闭后回到固件画面。
+
+- **连接**：安卓手机 USB 插上并允许调试后，应用自动 `adb reverse tcp:10002 tcp:10002`；在 Host「开发工具 → 显示设备 → 电脑模拟器」填 `127.0.0.1`、`10002`，点「连接模拟器」。同一局域网也可以直接填 Mac 的 IP。官方 Aapp Simulator 也占 10002，同时只能开一个。
+- **输入**：↑↓（或滚轮、表冠旋转）、←→、Return、Esc 与官方模拟器相同；空格=确认，D 双击=返回，L 长按；鼠标点击画面=触摸。
+- **安装应用**：「设备 → 安装 Aapp Host…」把 Host APK 装到所有连接的安卓设备；「设备 → 安装 Aapp 应用（.aapk）…」（⌘I）把包放进手机 Download 并打开 Host（在「运行与调试 → 导入 AAPK」选中）。
+- **日志控制台**（⇧⌘Y，类似 Xcode 调试区）：固件三个核（AP/BTH/M55C1）的 syslog、Renode、Aapp 显示链路、手机 Host 日志（`adb logcat` 的 `flutter`/`AappHost`：`app.log` 输出为 `JS · …`，崩溃 `RUNTIME · …`），可按来源/只看警告错误/搜索，暂停、清空（⌘K）、导出。
+- **运行控制**：⌘R 重新启动，⌘⌥P 暂停/继续（所有核和虚拟时间一起停），⌘S 眼镜截图，「设备 → 手机截图…」。
+- **模拟器**：「设备 → 启动 iPhone 模拟器」（没有设备时自动创建）；「设备 → 下载安卓模拟器」一次性装好 arm64 安卓 15 模拟器（约 2 GB，需确认），之后一键启动，连上后同样自动转发 10002，装 Host 即可在没有真机时开发 SDK 应用。iOS 模拟器没有蓝牙，不能直接连眼镜。
 
 ## 原理概要
 

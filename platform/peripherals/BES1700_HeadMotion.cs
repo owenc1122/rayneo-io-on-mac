@@ -5,6 +5,7 @@
 //   monitor: headMotion Pose 20 0      (pitch up 20 deg, roll 0)
 //            headMotion Nod             (down and back, ~0.6 s)    headMotion Shake   (left-right, ~0.8 s)
 //            headMotion Turn 30         (yaw 30 deg over 0.5 s)
+//            headMotion Look 10 -20     (glide to pitch 10, yaw -20 absolute; mouse drag in the app)
 // Axis convention = the BTH neck monitor's head frame (after its imu_params rotation, see Mount()):
 //   pitch = atan2(gy, gz), rotation about X, positive = head up (the head-up threshold, default 20 deg);
 //   roll  = atan2(-gx, sqrt(gy^2+gz^2)), rotation about Y; yaw about Z. Nod = X-rate peak-to-peak,
@@ -25,10 +26,23 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         public long Size => 0x100;
         public uint ReadDoubleWord(long offset) { return 0; }
         public void WriteDoubleWord(long offset, uint value) { }
-        public void Reset() { pitch = roll = 0; Apply(0, 0, 0, 0, 0); }
+        public void Reset() { pitch = roll = yaw = 0; generation++; Apply(0, 0, 0, 0, 0); }
 
         public double Pitch => pitch;
         public double Roll => roll;
+        public double Yaw => yaw;
+
+        // Live head control (Mac app mouse drag): move to an absolute pitch/yaw over a short glide.
+        // A newer Look supersedes the glide in flight, so a fast drag never queues stale steps.
+        public void Look(double pitchDegrees, double yawDegrees)
+        {
+            pitchDegrees = Math.Max(-60, Math.Min(60, pitchDegrees));
+            double dp = pitchDegrees - pitch, dy = yawDegrees - yaw;
+            double t = Math.Max(0.06, Math.Max(Math.Abs(dp), Math.Abs(dy)) / LookSpeed);
+            Play(new List<(double, double, double, double)> { (t, dp, 0, dy) }, supersede: true);
+        }
+        // Fastest head speed a drag may produce (deg/s); a real quick glance is ~300.
+        public double LookSpeed { get; set; } = 300;
 
         public void Pose(double pitchDegrees, double rollDegrees)
         {
@@ -43,8 +57,10 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         public void Turn(double yawDegrees) { Play(new List<(double, double, double, double)> { (0.5, 0, 0, yawDegrees) }); }
 
         // Each segment: duration (s), delta pitch, delta roll, delta yaw (deg), at constant rate.
-        private void Play(List<(double t, double dp, double dr, double dy)> segments)
+        private void Play(List<(double t, double dp, double dr, double dy)> segments, bool supersede = false)
         {
+            if(supersede) generation++;
+            int mine = generation;
             double at = 0;
             const double step = 0.02;
             foreach(var seg in segments) {
@@ -52,13 +68,14 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 double rp = seg.dp / seg.t, rr = seg.dr / seg.t, ry = seg.dy / seg.t;
                 for(int i = 0; i < n; i++) {
                     machine.ScheduleAction(TimeInterval.FromSeconds(at), _ => {
-                        pitch += rp * step; roll += rr * step;
+                        if(mine != generation) return;
+                        pitch += rp * step; roll += rr * step; yaw += ry * step;
                         Apply(pitch, roll, rp, rr, ry);
                     });
                     at += step;
                 }
             }
-            machine.ScheduleAction(TimeInterval.FromSeconds(at), _ => Apply(pitch, roll, 0, 0, 0));
+            machine.ScheduleAction(TimeInterval.FromSeconds(at), _ => { if(mine == generation) Apply(pitch, roll, 0, 0, 0); });
         }
         // Sensor mounting: the BTH neck monitor rotates IMU samples by Euler angles (roll, pitch, yaw) =
         // imu_params, default [101, -65, -65] deg when factory data is blank (AP log "Using default imu_params").
@@ -101,6 +118,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
         }
         private readonly IMachine machine;
         private readonly BES1700_LSM6DSO32 imu;
-        private double pitch, roll;
+        private double pitch, roll, yaw;
+        private int generation;
     }
 }

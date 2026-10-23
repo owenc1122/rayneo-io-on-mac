@@ -43,12 +43,16 @@ else
 fi
 python3 scripts/make-resc.py "$root" "$out" "$duration" "$extra" > "$out/boot.resc"
 resc=$(printf '%s' "$out/boot.resc" | sed 's/ /\\ /g')   # Renode @paths escape spaces
+# Renode compiles every platform/peripherals/*.cs on each start (~9 s). Its compiled-files cache (keyed by
+# the sources' SHA, kept in ~/.config/renode/compiler-cache) is off by default; COMPILE_CACHE=0 keeps it off.
+config=$out/renode.config
+if [ "${COMPILE_CACHE:-1}" = 1 ]; then printf '[general]\ncompiler-cache-enabled = true\n' > "$config"; else : > "$config"; fi
 if [ -n "${RENODE_MONITOR_PORT:-}" ]; then
     # Interactive (Mac app): monitor on a local TCP port for input injection.
-    exec "$renode" --disable-gui --plain -P "$RENODE_MONITOR_PORT" -e "include @$resc" > "$out/boot.log" 2>&1 < /dev/null
+    exec "$renode" --config "$config" --disable-gui --plain -P "$RENODE_MONITOR_PORT" -e "include @$resc" > "$out/boot.log" 2>&1 < /dev/null
 fi
 # No --console: Renode 1.17 crashes (SemaphoreFullException in ConsoleIOSource) a few
 # minutes after its console stdin hits EOF. The monitor listens on a local port instead.
-"$renode" --disable-gui --plain -P "${RENODE_BATCH_PORT:-23457}" -e "include @$resc" > "$out/boot.log" 2>&1 < /dev/null || true
+"$renode" --config "$config" --disable-gui --plain -P "${RENODE_BATCH_PORT:-23457}" -e "include @$resc" > "$out/boot.log" 2>&1 < /dev/null || true
 grep -E '^\[AP|^\[BTH|^\[C1|M55C1 released|BTH released|BTC released|Scanout' "$out/boot.log" | tail -40
 echo "log: $out/boot.log"

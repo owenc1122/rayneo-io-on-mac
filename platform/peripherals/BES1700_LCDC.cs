@@ -34,15 +34,19 @@ namespace Antmicro.Renode.Peripherals.Video
             if(qspiLog-->0) this.Log(LogLevel.Info,"QSPI cmd={0:X2} len={1} data={2:X8} {3:X8}",ReadDoubleWord(0x284),length,ReadDoubleWord(0x288),ReadDoubleWord(0x28c));
             // Panel row window: cmd 0x02, bytes 00 2A 00 <start hi> <start lo> <end hi> <end lo>
             // (rayneo_lcdc_send_cmd_list before each partial/full transfer).
-            if(ReadDoubleWord(0x284)==0x02 && length>=7) {
-                var b=new byte[7];
-                for(int i=0;i<7;i++) b[i]=(byte)(ReadDoubleWord(0x288+(i/4)*4)>>(24-8*(i%4)));
-                if(b[1]==0x2a) { windowStart=(b[3]<<8)|b[4]; windowEnd=(b[5]<<8)|b[6]; }
-            }
             var previous=panel.ReadDoubleWord(0);
             uint selections=(1u<<16)|(1u<<23);
             uint selected=(~previous)&selections;
             if(selected==0) selected=(ReadDoubleWord(0x2a8)&3)==2 ? 1u<<23 : 1u<<16;
+            if(ReadDoubleWord(0x284)==0x02 && length>=7) {
+                var b=new byte[7];
+                for(int i=0;i<7;i++) b[i]=(byte)(ReadDoubleWord(0x288+(i/4)*4)>>(24-8*(i%4)));
+                // The window goes to the panels selected now; each panel's write pointer restarts at its top row.
+                if(b[1]==0x2a) {
+                    int start=(b[3]<<8)|b[4], end=(b[5]<<8)|b[6];
+                    for(int e=0;e<2;e++) if((selected&(e==0?1u<<16:1u<<23))!=0) {windowStart[e]=start;windowEnd[e]=end;writeRow[e]=start;}
+                }
+            }
             panel.WriteDoubleWord(0,selections);
             panel.WriteDoubleWord(12,selected);
             panel.TransferPanelByte((byte)ReadDoubleWord(0x284));
@@ -58,7 +62,12 @@ namespace Antmicro.Renode.Peripherals.Video
             System.IO.File.WriteAllBytes(path, machine.GetSystemBus(this).ReadBytes(address, length));
         }
         private int qspiLog=0;
-        private int windowStart=-1, windowEnd=-1;
+        // Monitor: `lcdc TraceScanouts true` logs every scanout (address, size, row window, eye).
+        public bool TraceScanouts {get; set;}
+        // Per eye: the row window of the last 0x2A command and the panel's write pointer inside it. A refresh
+        // may arrive as several transfers under one window (full frame = rows 0..278 then 279; a partial area in
+        // chunks); like the panel's RAM write, each transfer continues where the previous one ended.
+        private readonly int[] windowStart={-1,-1}, windowEnd={-1,-1}, writeRow={-1,-1};
         private void ScanOut()
         {
             uint control=ReadDoubleWord(0x190), address=ReadDoubleWord(0xc0);
@@ -73,19 +82,30 @@ namespace Antmicro.Renode.Peripherals.Video
             bool eyeA=(cs&(1u<<16))!=0, eyeB=(cs&(1u<<23))!=0;
             if(!eyeA && !eyeB) eyeA=eyeB=true;                 // LCDC mux without GPIO CS (boot logo path)
             if(stride==RowBytes && width*3<=EyeWidth/2) {
-                int firstRow=windowStart>=0 && windowStart<EyeHeight ? windowStart : RowOf(address,height,eyeA?0:1);
-                for(int r=0;r<height && firstRow+r<EyeHeight;r++) {
-                    int y=firstRow+r; if(y<0) continue;
-                    for(int b=0;b<width*3;b++) {
-                        byte v=LastFrame[r*stride+b];
-                        int x=b*2;
-                        if(eyeA) {canvas[y*2*EyeWidth+x]=(byte)((v>>4)*17);canvas[y*2*EyeWidth+x+1]=(byte)((v&15)*17);}
-                        if(eyeB) {canvas[y*2*EyeWidth+EyeWidth+x]=(byte)((v>>4)*17);canvas[y*2*EyeWidth+EyeWidth+x+1]=(byte)((v&15)*17);}
+                for(int e=0;e<2;e++) {
+                    if(!(e==0 ? eyeA : eyeB)) continue;
+                    int firstRow;
+                    if(writeRow[e]>=0 && writeRow[e]<EyeHeight) {
+                        firstRow=writeRow[e];
+                        if(height>=EyeHeight-1) bases[e]=address;
+                        writeRow[e]+=height;
+                        if(writeRow[e]>windowEnd[e]) writeRow[e]=windowStart[e];   // panel wraps to the window top
+                    } else firstRow=RowOf(address,height,e);
+                    int column=e*EyeWidth;
+                    for(int r=0;r<height && firstRow+r<EyeHeight;r++) {
+                        int y=firstRow+r; if(y<0) continue;
+                        int row=y*2*EyeWidth+column, src=r*stride;
+                        for(int b=0;b<width*3;b++) {
+                            byte v=LastFrame[src+b];
+                            canvas[row+b*2]=(byte)((v>>4)*17);canvas[row+b*2+1]=(byte)((v&15)*17);
+                        }
                     }
                 }
             } else this.Log(LogLevel.Warning,"Non-RayNeo layer geometry {0}x{1} stride {2}; canvas not updated",width,height,stride);
             if(FrameImagePath!=null) QueueFrameWrite();
             if(capturePath!=null) System.IO.File.WriteAllBytes(capturePath,LastFrame);
+            if(TraceScanouts) this.Log(LogLevel.Info,"Scanout {0}: address={1:X} {2}x{3} window0={4}..{5} row0={6} window1={7}..{8} row1={9} cs={10:X}",
+                CompletedFrames,address,width,height,windowStart[0],windowEnd[0],writeRow[0],windowStart[1],windowEnd[1],writeRow[1],cs);
             if(CompletedFrames<=4) this.Log(LogLevel.Info,"Scanout copied: frame={0} address={1:X} size={2}x{3} stride={4} cs={5:X}",CompletedFrames,address,width,height,stride,cs);
             base.WriteDoubleWord(0x224,0);
             base.WriteDoubleWord(0x1c4,ReadDoubleWord(0x1c4)|0x100400u);

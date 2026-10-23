@@ -92,8 +92,33 @@ namespace Antmicro.Renode.Peripherals.Video
 
         // 0xA00 control: [1:0] 1=rectangle; bit2 = PE clear (vg_lite_clear 0x1059f86c); otherwise path.
         // [11:8] blend (convert_blend 0x1059e5ec), [14:12] image mode, bit15 transparency.
+        // Monitor: `gpu TracePrimitives true` logs every primitive (target, rectangle/path bounds, source, texture steps).
+        public bool TracePrimitives {get; set;}
+        public bool TraceStates {get; set;}
+        private void TracePrimitive(string kind,uint ctrl,string extra) {
+            var t=GetTarget(); var s=GetSource();
+            this.Log(LogLevel.Info,"PRIM {0} ctrl={1:X} tgt={2:X} f={3:X} {4}x{5} st={6} src={7:X} f={8:X} {9}x{10} st={11} tess={12:X}/{13:X} uv=[{14}] {15}",
+                kind,ctrl,t.Address,t.Format,t.Width,t.Height,t.Stride,s.Address,s.Format,s.Width,s.Height,s.Stride,S(0xa39),S(0xa3a),
+                string.Join(",",System.Linq.Enumerable.Select(System.Linq.Enumerable.Range(0,11),i=>F(0xa18+(uint)i).ToString("0.####"))),extra);
+        }
         private void OnData(byte[] payload) {
             uint ctrl=S(0xa00);
+            if(TracePrimitives) {
+                string extra=(ctrl&3)==1 && payload.Length>=8 ? string.Format("rect {0},{1} {2}x{3}",BitConverter.ToUInt16(payload,0),BitConverter.ToUInt16(payload,2),BitConverter.ToUInt16(payload,4),BitConverter.ToUInt16(payload,6))
+                    : string.Format("path {0}B m=[{1:0.###} {2:0.###} {3:0.###}; {4:0.###} {5:0.###} {6:0.###}]",payload.Length,F(0xa40),F(0xa41),F(0xa42),F(0xa43),F(0xa44),F(0xa45));
+                TracePrimitive((ctrl&4)!=0&&(ctrl&3)==0?"clear":(ctrl&3)==1?"rect":"path",ctrl,extra);
+                if(TraceStates) {
+                    var sb=new System.Text.StringBuilder("STATES");
+                    for(uint r=0xa20;r<0xa40;r++) if(state.ContainsKey(r)) sb.AppendFormat(" {0:X}={1:X}",r,state[r]);
+                    var src=GetSource();
+                    if((src.Format&0xe00)!=0) {
+                        sb.Append(" CLUT"); for(uint i=0;i<16;i++) sb.AppendFormat(" {0:X}",clut.TryGetValue(i,out var e)?e:0);
+                        int n=Math.Min(512,src.Stride*src.Height);
+                        if(n>0 && src.Address!=0) sb.Append(" DATA ").Append(BitConverter.ToString(bus.ReadBytes(src.Address,n)).Replace("-",""));
+                    }
+                    this.Log(LogLevel.Info,sb.ToString());
+                }
+            }
             if((ctrl&4)!=0 && (ctrl&3)==0) {PeClear();return;}
             if((ctrl&3)==1) {
                 int x=BitConverter.ToUInt16(payload,0),y=BitConverter.ToUInt16(payload,2),w=BitConverter.ToUInt16(payload,4),h=BitConverter.ToUInt16(payload,6);
@@ -216,21 +241,27 @@ namespace Antmicro.Renode.Peripherals.Video
         }
 
         // ---------------- image source ----------------
-        private struct Src {public uint Address,Format,Filter;public int Stride,Width,Height;public bool Valid;}
+        private struct Src {public uint Address,Format,Filter;public int Stride,Width,Height,OriginX,OriginY;public bool Valid;}
         private Src GetSource() {
-            // vg_lite_blit_rect 0x1059f9b4 writes 0xA25 format|filter, 0xA29 address, 0xA2B stride, 0xA2F w|h<<16.
-            // vg_lite_draw_pattern also writes the 0xA24/0xA28/0xA2A/0xA2E bank; prefer the bank that was most recently given an address.
+            // vg_lite_blit_rect 0x1059f9b4 writes 0xA25 format|filter, 0xA29 address, 0xA2B stride, 0xA2D source-rectangle
+            // origin x|y<<16, 0xA2F source-rectangle w|h<<16. Texture coordinates (0xA18..) are relative to that rectangle:
+            // LVGL clips an image by drawing a sub-rectangle of the same buffer (e.g. the bottom 39 rows of a 65x65 icon
+            // as origin 0,26 size 65x39), so the origin must be added when fetching.
+            // vg_lite_draw_pattern also writes the 0xA24/0xA28/0xA2A/0xA2C/0xA2E bank; prefer the bank that was most recently given an address.
             uint fA25=S(0xa25),fA24=S(0xa24);
             bool useB=lastSrcBank==1 && S(0xa28)!=0;
             uint f=useB?fA24:fA25;
+            uint origin=useB?S(0xa2c):S(0xa2d);
             // 0x01000100 = src_premultiply_enable (vg_lite.c), not part of the format code.
             return new Src{Valid=true,Format=f&~0x30000u&~0x01000100u,Filter=f&0x30000,Address=useB?S(0xa28):S(0xa29),
                            Stride=(int)((useB?S(0xa2a):S(0xa2b))&0xfffffff),
-                           Width=(int)((useB?S(0xa2e):S(0xa2f))&0xffff),Height=(int)((useB?S(0xa2e):S(0xa2f))>>16)};
+                           Width=(int)((useB?S(0xa2e):S(0xa2f))&0xffff),Height=(int)((useB?S(0xa2e):S(0xa2f))>>16),
+                           OriginX=(int)(origin&0xffff),OriginY=(int)(origin>>16)};
         }
         private int lastSrcBank;
         private C Fetch(Src s,int x,int y,Dictionary<int,byte[]> rows) {
             if(x<0||y<0||x>=s.Width||y>=s.Height) return new C();
+            x+=s.OriginX; y+=s.OriginY;
             if(!rows.TryGetValue(y,out var row)) {row=bus.ReadBytes(s.Address+(ulong)(y*s.Stride),s.Stride);rows[y]=row;}
             uint f=s.Format;
             if((f&0x60000000)==0x20000000) {int o=x*3;return (f&0x30)==0x20?new C{R=row[o]/255f,G=row[o+1]/255f,B=row[o+2]/255f,A=1}:new C{B=row[o]/255f,G=row[o+1]/255f,R=row[o+2]/255f,A=1};} // BGR888/RGB888
@@ -238,7 +269,12 @@ namespace Antmicro.Renode.Peripherals.Video
             uint idx=f&0xe00;
             if(idx!=0 && (f&0x1000)==0) {                                     // INDEX_1/2/4/8 with CLUT from 0xB00 states
                 int bits=idx==0x200?1:idx==0x400?2:idx==0x600?4:8; int bit=x*bits;
-                int v=(row[bit>>3]>>(8-bits-(bit&7)))&((1<<bits)-1);           // MSB-first (LVGL I1/I2/I4 order)
+                // vg_lite index order defaults to little endian: the first pixel is in the LOW bits of each byte
+                // (proved on the 1.0.4.12 status-bar INDEX_4 icons: LSB-first gives the clean Bluetooth-off glyph,
+                // MSB-first the speckled one). Bit 14 = big-endian index order (not seen in this firmware).
+                bool msb=(f&0x4000)!=0; if(msb) Once("idxbe","Big-endian index order used");
+                int shift=msb?8-bits-(bit&7):(bit&7);
+                int v=(row[bit>>3]>>shift)&((1<<bits)-1);
                 uint p=clut.TryGetValue((uint)v,out var e)?e:0;                // palette word as stored by LVGL lv_color32_t (0xAARRGGBB)
                 return new C{B=(p&255)/255f,G=((p>>8)&255)/255f,R=((p>>16)&255)/255f,A=(p>>24)/255f};
             }

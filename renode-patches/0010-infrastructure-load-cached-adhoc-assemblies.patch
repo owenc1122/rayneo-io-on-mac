@@ -1,0 +1,17 @@
+diff --git a/src/Emulator/Extensions/UserInterface/Monitor.cs b/src/Emulator/Extensions/UserInterface/Monitor.cs
+index d2cebb700..1c406ea78 100755
+--- a/src/Emulator/Extensions/UserInterface/Monitor.cs
++++ b/src/Emulator/Extensions/UserInterface/Monitor.cs
+@@ -393,6 +393,12 @@ public bool TryCompilePlugin(string[] filenames, ICommandInteraction writer = nu
+                     Assembly.LoadFrom(compiledCode);
+                     EmulationManager.Instance.CompiledFilesCache.StoreEntryWithSha(sha, compiledCode);
+                 }
++                else
++                {
++                    // A cached assembly must be loaded too, or a later ad-hoc compilation that references its
++                    // types (one file changed, its dependencies still cached) fails and the script stops.
++                    Assembly.LoadFrom(compiledCode);
++                }
+ 
+                 cache.ClearCache();
+                 var result = TypeManager.Instance.ScanFile(compiledCode);

@@ -173,7 +173,13 @@ if seconds != '0':
     lines += [
               'console_log `cpu PC`', 'console_log `cpu LR`', 'console_log `bth PC`', 'console_log `c1 PC`', 'console_log `btc PC`', 'quit']
 else:
-    # Mac app: keep virtual time from running ahead of the host (REALTIME=0 to run flat out).
+    # Mac app: boot flat out (logo to desktop is ~12 s of virtual time, ~6 s on an M-series Mac), then keep
+    # virtual time from running ahead of the host (REALTIME=0 runs flat out throughout).
+    # FAST_BOOT=<virtual seconds>, 0 paces from the first instruction.
+    fast_boot = __import__('os').environ.get('FAST_BOOT', '12')
+    if fast_boot not in ('', '0'):
+        lines += ['emulation SetGlobalAdvanceImmediately true', f'emulation RunFor "{fast_boot}"',
+                  'emulation SetGlobalAdvanceImmediately false', 'console_log "fast boot done"']
     if __import__('os').environ.get('REALTIME') != '0':
         lines.append('aonCmu RealTime true')
     lines.append('start')
