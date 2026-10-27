@@ -238,6 +238,7 @@ class RnlinkPhone:
         self.started = False
         self.dev_info_done = False
         self.authed = False
+        self.evt = 0; self.later = []             # (connection event number, raw business-15 payload): timed sends
         self.rand = bytes.fromhex('a5b4c3d2')
         self.glasses_dev_addr = b''
         self.ft = FileSender(self)
@@ -245,6 +246,12 @@ class RnlinkPhone:
         self.ota_files = [n for n in os.environ.get('OTA_FILES', '').split(',') if n]  # subset; empty = all
 
     # ---- outbound ----
+    def tick(self):
+        """Called once per BLE connection event (30 ms of emulated time): sends what is due."""
+        self.evt += 1
+        while self.later and self.later[0][0] <= self.evt:
+            self.tx(0x0f, self.later.pop(0)[1])
+
     def tx(self, business, payload, ctrl=0):
         self.send(frame(business, payload, ctrl=ctrl))
 
@@ -441,23 +448,39 @@ class RnlinkPhone:
             if raw[:4] == b'SGE1' and raw[5] == 12:
                 self.say('spare-app SGE1 event 12 op=%d a=%d b=%d tail=%s' % (raw[13], raw[14], raw[15], raw[17:32].hex()))
             if raw[:4] == b'SGE1' and raw[5] == 12 and raw[13] == 3:
+                import os
                 h, n = raw[17:21], raw[21]
                 arg = raw[22:22 + n].decode('utf8', 'replace')
                 table = json.load(open(__import__('os').environ['SPARE_SGD1']))
                 # key "<request index>:<arg>" first, then "<arg>"; a list = several replies in order (e.g. dictation partials)
                 replies = table.get('%d:%s' % (raw[14], arg), table.get(arg, {}))
+                # list entries: {key: value} = one reply; {"_after": s} = wait s seconds (emulated, 30 ms per connection
+                # event); {"_sgb1": png} = send that picture as SGB1 chunks (one per event); "_seq0": true = push (seq 0)
+                due = self.evt + 1
                 for vals in (replies if isinstance(replies, list) else [replies]):
-                    pairs = [bytes([len(k)]) + k.encode() + bytes([len(v.encode())]) + v.encode() for k, v in vals.items()]
+                    if '_after' in vals:
+                        due += int(float(vals['_after']) * 1000 / 30); continue
+                    if '_sgb1' in vals:
+                        from PIL import Image
+                        im = Image.open(os.path.join(os.path.dirname(os.environ['SPARE_SGD1']), vals['_sgb1'])).convert('L')
+                        w, hh = im.size; px = [v >> 4 for v in im.getdata()]
+                        data = bytes(px[i] << 4 | px[i + 1] for i in range(0, len(px), 2))
+                        for k in range(0, (len(data) + 199) // 200):
+                            part = data[k * 200:(k + 1) * 200]
+                            last = 1 if (k + 1) * 200 >= len(data) else 0
+                            self.later.append((due, b'SGB1\x01' + bytes([last]) + h + struct.pack('<HHH', w, hh, k) + part)); due += 1
+                        self.say('spare-app -> SGB1 %s %dx%d (%d chunks)' % (vals['_sgb1'], w, hh, (len(data) + 199) // 200)); continue
+                    seq = 0 if vals.get('_seq0') else raw[15]
+                    pairs = [bytes([len(k)]) + k.encode() + bytes([len(v.encode())]) + v.encode() for k, v in vals.items() if not k.startswith('_')]
                     msgs, cur = [], []
                     for p in pairs:                      # SGD1 <= 240 bytes: split, final flag on the last one
-                        if cur and 12 + sum(map(len, cur)) + len(p) > 240:
+                        if cur and (12 + sum(map(len, cur)) + len(p) > 240 or len(cur) == 16):   # <= 240 B, <= 16 keys
                             msgs.append(cur); cur = []
                         cur.append(p)
                     msgs.append(cur)
                     for i, m in enumerate(msgs):
-                        sgd = b'SGD1\x01' + bytes([len(m)]) + h + bytes([raw[15], 1 if i == len(msgs) - 1 else 0]) + b''.join(m)
-                        self.tx(0x0f, sgd)
-                    self.say('spare-app -> SGD1 seq=%d k=%d arg=%s %s (%d msgs)' % (raw[15], raw[14], arg, vals, len(msgs)))
+                        self.later.append((due, b'SGD1\x01' + bytes([len(m)]) + h + bytes([seq, 1 if i == len(msgs) - 1 else 0]) + b''.join(m)))
+                    self.say('spare-app -> SGD1 seq=%d k=%d arg=%s %s (%d msgs)' % (seq, raw[14], arg, vals, len(msgs)))
         # Answer the glasses' time request with the current wall-clock + timezone.
         if 'sync_time' in text:
             import json, time as _t

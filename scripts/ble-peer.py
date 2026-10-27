@@ -395,6 +395,7 @@ def main():
                 if c.connected_cs is None:
                     reply = 'NONE'
                 else:
+                    c.rn.tick()                     # timed phone sends (rnlink.RnlinkPhone.later)
                     llid, payload = c.next_pdu()
                     reply = 'RX %02x %s' % (llid, payload.hex())
             elif w[0] == 'TX':
