@@ -430,6 +430,24 @@ class RnlinkPhone:
         self.say('rnlink %s type=%s msg=%s' % (BUSINESS.get(business, hex(business)), typ, text))
         if business != 0x0f:
             return
+        # SPARE_SGD1=<json file {arg: {key: value}}>: answer a Spare app's data request (SGE1 event 12 op 3) with a
+        # raw SGD1 business-15 message, as the Spare iPhone app's bridge would (docs/PROTOCOL-apps.md).
+        if 'spare_ai_v1' in text and __import__('os').environ.get('SPARE_SGD1'):
+            import json, struct
+            try:
+                raw = bytes.fromhex(json.loads(text)['payload']['data'])
+            except Exception:
+                raw = b''
+            if raw[:4] == b'SGE1' and raw[5] == 12:
+                self.say('spare-app SGE1 event 12 op=%d a=%d b=%d tail=%s' % (raw[13], raw[14], raw[15], raw[17:32].hex()))
+            if raw[:4] == b'SGE1' and raw[5] == 12 and raw[13] == 3:
+                h, n = raw[17:21], raw[21]
+                arg = raw[22:22 + n].decode('utf8', 'replace')
+                vals = json.load(open(__import__('os').environ['SPARE_SGD1'])).get(arg, {})
+                body = b''.join(bytes([len(k)]) + k.encode() + bytes([len(v.encode())]) + v.encode() for k, v in vals.items())
+                sgd = b'SGD1\x01' + bytes([len(vals)]) + h + bytes([raw[15], 1]) + body
+                self.say('spare-app -> SGD1 seq=%d arg=%s %s' % (raw[15], arg, vals))
+                self.tx(0x0f, sgd)
         # Answer the glasses' time request with the current wall-clock + timezone.
         if 'sync_time' in text:
             import json, time as _t
@@ -747,6 +765,11 @@ class RnlinkPhone:
                     import json as _j
                     for t in range(1, 40):
                         self.tx(0x14, pb_msg(t, message=_j.dumps({'probe': t})))
+                # SPARE_FILES=name=path,...: push these files over the rnlink file channel after auth, in
+                # order (Spare apps runtime install parts spare-app.spi / spare-rt.cfg, docs/PROTOCOL-apps.md).
+                for item in [x for x in __import__('os').environ.get('SPARE_FILES', '').split(',') if x]:
+                    name, path = item.split('=', 1)
+                    self.ft.send_file(0x12, name, open(path, 'rb').read())
                 if self.ota_dir:
                     self.start_ota()
                 if getattr(self, 'notif_demo', False):
