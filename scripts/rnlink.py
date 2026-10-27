@@ -443,11 +443,21 @@ class RnlinkPhone:
             if raw[:4] == b'SGE1' and raw[5] == 12 and raw[13] == 3:
                 h, n = raw[17:21], raw[21]
                 arg = raw[22:22 + n].decode('utf8', 'replace')
-                vals = json.load(open(__import__('os').environ['SPARE_SGD1'])).get(arg, {})
-                body = b''.join(bytes([len(k)]) + k.encode() + bytes([len(v.encode())]) + v.encode() for k, v in vals.items())
-                sgd = b'SGD1\x01' + bytes([len(vals)]) + h + bytes([raw[15], 1]) + body
-                self.say('spare-app -> SGD1 seq=%d arg=%s %s' % (raw[15], arg, vals))
-                self.tx(0x0f, sgd)
+                table = json.load(open(__import__('os').environ['SPARE_SGD1']))
+                # key "<request index>:<arg>" first, then "<arg>"; a list = several replies in order (e.g. dictation partials)
+                replies = table.get('%d:%s' % (raw[14], arg), table.get(arg, {}))
+                for vals in (replies if isinstance(replies, list) else [replies]):
+                    pairs = [bytes([len(k)]) + k.encode() + bytes([len(v.encode())]) + v.encode() for k, v in vals.items()]
+                    msgs, cur = [], []
+                    for p in pairs:                      # SGD1 <= 240 bytes: split, final flag on the last one
+                        if cur and 12 + sum(map(len, cur)) + len(p) > 240:
+                            msgs.append(cur); cur = []
+                        cur.append(p)
+                    msgs.append(cur)
+                    for i, m in enumerate(msgs):
+                        sgd = b'SGD1\x01' + bytes([len(m)]) + h + bytes([raw[15], 1 if i == len(msgs) - 1 else 0]) + b''.join(m)
+                        self.tx(0x0f, sgd)
+                    self.say('spare-app -> SGD1 seq=%d k=%d arg=%s %s (%d msgs)' % (raw[15], raw[14], arg, vals, len(msgs)))
         # Answer the glasses' time request with the current wall-clock + timezone.
         if 'sync_time' in text:
             import json, time as _t
