@@ -251,6 +251,9 @@ class RnlinkPhone:
         self.evt += 1
         while self.later and self.later[0][0] <= self.evt:
             self.tx(0x0f, self.later.pop(0)[1])
+        while getattr(self, 'later_files', None) and self.later_files[0][0] <= self.evt:
+            _, name, data = self.later_files.pop(0)
+            self.ft.send_file(0x12, name, data)
 
     def tx(self, business, payload, ctrl=0):
         self.send(frame(business, payload, ctrl=ctrl))
@@ -800,9 +803,16 @@ class RnlinkPhone:
                         self.tx(0x14, pb_msg(t, message=_j.dumps({'probe': t})))
                 # SPARE_FILES=name=path,...: push these files over the rnlink file channel after auth, in
                 # order (Spare apps runtime install parts spare-app.spi / spare-rt.cfg, docs/PROTOCOL-apps.md).
-                for item in [x for x in __import__('os').environ.get('SPARE_FILES', '').split(',') if x]:
+                # SPARE_FILES_EVERY=<s>: one file every s seconds of emulated time (30 ms per connection event), the
+                # way the phone streams SGN1 scenes (spare-nav.sgn), instead of all at once.
+                every = float(__import__('os').environ.get('SPARE_FILES_EVERY', '0') or 0)
+                self.later_files = getattr(self, 'later_files', [])
+                for k, item in enumerate([x for x in __import__('os').environ.get('SPARE_FILES', '').split(',') if x]):
                     name, path = item.split('=', 1)
-                    self.ft.send_file(0x12, name, open(path, 'rb').read())
+                    if every > 0:
+                        self.later_files.append((self.evt + 1 + int(k * every * 1000 / 30), name, open(path, 'rb').read()))
+                    else:
+                        self.ft.send_file(0x12, name, open(path, 'rb').read())
                 if self.ota_dir:
                     self.start_ota()
                 if getattr(self, 'notif_demo', False):
