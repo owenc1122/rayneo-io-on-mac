@@ -46,11 +46,12 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                     // inside this lock, can deadlock against Tick waiting for the lock)
                     restart = true;
                     pending.Clear(); generation++;
+                    audio.BthVadChannels = Running(value) ? Channels(value) : 0;   // 3 = the BTH lifelog VAD pipeline
                     this.Log(LogLevel.Info, "codec: ADC2 {0} ({1} channels)", Running(value) ? "started" : "stopped", Channels(value));
                 }
             }
         }
-        public void Reset() { lock(regs) { regs.Clear(); pending.Clear(); generation++; } }
+        public void Reset() { lock(regs) { regs.Clear(); pending.Clear(); generation++; audio.BthVadChannels = 0; } }
 
         private static bool Running(uint v) { return (v & 0x100001) == 0x100001; }
         private static int Channels(uint v) { int n = 0; for(int b = 1; b <= 8; b++) if((v & (1u << b)) != 0) n++; return Math.Max(1, n); }

@@ -165,6 +165,50 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             this.Log(LogLevel.Info, "hifi4: t={0:0.000}s wake word {1} -> hifi event {2}", MicNow() / (double)MicRate, ev == 6 ? "not confirmed" : "confirmed", ev);
         }
 
+        // ---- BTH life-log VAD (全天智记). The BTH's lifelog pipeline (smf 0x62: codec2 3 ch -> pil_algo_vad_demo
+        // "vad" -> sink-shm sidx=1) runs the Elevoc VAD, which reports speech through a BTH event Notify on stream
+        // 0x62: aux1 0x10, u32 0xb = "vad detected open", 0xc = "close" (AP: smf_message_callback ->
+        // venus_map_bth_media_event +8 -> vad_event_callback 0x13/0x14 -> result 16/17 ->
+        // AlwaysOnAudioAdapter::handleWakeupResult -> AlwaysOn VadStart/VadEnd). The emulated BTH runs that DLL,
+        // but the Elevoc licence check fails without the device's factory licence, so it never reports speech.
+        // In its place: an energy VAD on the microphone timeline while ADC2 runs with the lifelog's 3 channels
+        // (the codec model sets BthVadChannels), its events sent as that Notify. The life-log audio itself is
+        // the DSP stream 0x61 "vadrec" ([4,1], opened by the AP after VadStart), served by StreamAdd like any
+        // other DSP->AP record stream.
+        public int BthVadChannels { get { return bthVadChannels; } set { bthVadChannels = value; } }
+        public bool BthVad { get; set; } = true;
+        public int BthVadReleaseMs { get; set; } = 1500;
+        public double BthVadMinDb { get; set; } = -50;
+        private volatile int bthVadChannels;
+        private bool vadSpeech, vadActive; private long vadNext; private int vadAbove, vadBelow; private double vadFloor = -70;
+        private const int VadFrame = MicRate / 50, LifelogStream = 0x62;
+
+        private void StepBthVad()
+        {
+            bool on = BthVad && bthVadChannels == 3 && !string.IsNullOrEmpty(micPath);
+            if(!on) { if(vadActive) { vadActive = false; vadSpeech = false; } return; }
+            long now = MicNow();
+            if(!vadActive) { vadActive = true; vadSpeech = false; vadAbove = vadBelow = 0; vadFloor = -70; vadNext = now; }
+            while(vadNext + VadFrame <= now) {
+                var f = MicSamples(vadNext, VadFrame);
+                vadNext += VadFrame;
+                double e = 0; foreach(var x in f) e += (double)x * x;
+                double db = 10 * Math.Log10(e / VadFrame / (32768.0 * 32768.0) + 1e-12);
+                if(db < vadFloor) vadFloor = db; else vadFloor = Math.Min(db, vadFloor + 0.05);
+                bool loud = db > Math.Max(BthVadMinDb, vadFloor + 12);
+                if(loud) { vadAbove++; vadBelow = 0; } else { vadBelow++; vadAbove = 0; }
+                if(!vadSpeech && vadAbove >= 3) {
+                    vadSpeech = true;
+                    SendNotify(LifelogStream, 0x10, 0xb);
+                    this.Log(LogLevel.Info, "hifi4: t={0:0.000}s lifelog VAD speech start ({1:0.0} dBFS) -> bth event 0xb", vadNext / (double)MicRate, db);
+                } else if(vadSpeech && vadBelow * 20 >= BthVadReleaseMs) {
+                    vadSpeech = false;
+                    SendNotify(LifelogStream, 0x10, 0xc);
+                    this.Log(LogLevel.Info, "hifi4: t={0:0.000}s lifelog VAD speech end -> bth event 0xc", vadNext / (double)MicRate);
+                }
+            }
+        }
+
         // StreamServer::Notify layout: msgid 0xff, size 0x88, aux0 stream, aux1 event, u16 datalen @0xa, data @0xc.
         private void SendNotify(byte stream, byte ev, uint value)
         {
@@ -217,6 +261,7 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
             }
             if(!string.IsNullOrEmpty(micPath)) lock(micLock) Fill(MicNow());
             CheckWakeTimeout();
+            if(state >= 2) StepBthVad();
             if(state >= 2) {
                 ServiceVring1();
                 foreach(var s in streams.Values) PumpStream(s);

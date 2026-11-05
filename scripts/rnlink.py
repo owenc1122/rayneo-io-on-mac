@@ -297,6 +297,10 @@ class RnlinkPhone:
         self.say('rnlink <- %s ctrl=%d flags=%x %s%s' % (
             bn, ctrl, flags, payload.hex(), '' if crc_ok else ' CRC-BAD'))
         if not crc_ok:
+            # life-log audio batches (VOICE_ASSISTANT_CMD 163, ~7.5 KB) arrive whole but fail the CRC check
+            # here; their protobuf decodes cleanly, so count them anyway
+            if business == 0x0d and pb_decode(payload).get(2) == self.ALWAYS_ON_AUDIO:
+                self.on_assistant(payload)
             return                              # skip fragmented/partial frames for now
         if business == 0x10 and len(payload) >= 3:
             cmd = payload[0]; data = payload[3:]
@@ -380,13 +384,42 @@ class RnlinkPhone:
             msg = json.loads(pb.get(3, b'{}').decode())
         except Exception:
             msg = {}
+        if typ == self.ALWAYS_ON_AUDIO:   # life-log audio (Opus frames), logged sparsely
+            self.on_alwayson_audio(pb, msg)
+            return
         self.say('rnlink VOICE_ASSISTANT_CMD type=%s %s' % (typ, msg))
+        if typ == self.ALWAYS_ON_WAKEUP:  # 全天智记 VAD session start -> accept it as the phone app does
+            self.alwayson_task = getattr(self, 'alwayson_task', 0) + 1
+            reply = {'taskId': 'emu-lifelog-%d' % self.alwayson_task,
+                     'idleTimeoutSec': int(os.environ.get('LIFELOG_IDLE_SEC', '30'))}
+            self.tx(0x0d, pb_msg(self.ALWAYS_ON_WAKEUP_RECV, message=json.dumps(reply)))
+            self.say('rnlink VOICE_ASSISTANT -> ALWAYS_ON_WAKEUP_RECV %s' % reply)
+            return
         if typ == 1:                      # WAKEUP -> start a stand-in voice session
             if os.environ.get('ASSIST_PROBE'):
                 for t in range(2, 60):    # map type numbers: glasses log the received type name
                     self.tx(0x0d, pb_msg(t, message=json.dumps({'text': 'probe-%d' % t, 'final': True})))
                 return
             self.assist_answer()
+
+    # 全天智记 / life-log (AlwaysOnMessageProcessor), message-type table at 0x104975c4 in the stock AP:
+    # 161 ALWAYS_ON_WAKEUP_SEND (glasses: VAD heard speech), 162 ALWAYS_ON_WAKEUP_RECV (phone: {taskId,
+    # idleTimeoutSec} -> recording starts), 163 ALWAYS_ON_AUDIO_SEND (glasses: audio), 165/166 ABORT, 168 page state.
+    ALWAYS_ON_WAKEUP, ALWAYS_ON_WAKEUP_RECV, ALWAYS_ON_AUDIO = 161, 162, 163
+
+    def on_alwayson_audio(self, pb, msg):
+        import os
+        data = pb.get(4, b'') or pb.get(3, b'')
+        if not isinstance(data, (bytes, bytearray)): data = str(data).encode()
+        self.alwayson_frames = getattr(self, 'alwayson_frames', 0) + 1
+        self.alwayson_bytes = getattr(self, 'alwayson_bytes', 0) + len(data)
+        n = self.alwayson_frames
+        if n <= 3 or n % 50 == 0:
+            self.say('rnlink VOICE_ASSISTANT_CMD ALWAYS_ON_AUDIO_SEND #%d %d bytes (total %d) %s' % (
+                n, len(data), self.alwayson_bytes, msg))
+        path = os.environ.get('LIFELOG_AUDIO')   # optional: append each message's audio payload
+        if path:
+            with open(path, 'ab') as f: f.write(len(data).to_bytes(4, 'little') + bytes(data))
 
     # Assistant message types (probed from the glasses' dispatchMessage log):
     ASSIST_ASR = 5          # ASR_TEXT {text, final} -> shows the recognized query
