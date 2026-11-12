@@ -41,6 +41,8 @@ if [ -x "$venv/bin/python" ]; then
 else
     echo 'note: no littlefs venv (scripts/setup-tools.sh); NAND resources not prepared' >&2
 fi
+# Hook addresses differ per firmware build (scripts/make-resc.py PROFILES); pick by the AP image MD5.
+if [ -z "${FW_PROFILE:-}" ] && grep -q 94d28a6e1bb4df87e3e0cefc3549ee82 "$fwdir/OtaFileInfo.json"; then export FW_PROFILE=1.0.6.11; fi
 python3 scripts/make-resc.py "$root" "$out" "$duration" "$extra" > "$out/boot.resc"
 resc=$(printf '%s' "$out/boot.resc" | sed 's/ /\\ /g')   # Renode @paths escape spaces
 # Renode compiles every platform/peripherals/*.cs on each start (~9 s). Its compiled-files cache (keyed by

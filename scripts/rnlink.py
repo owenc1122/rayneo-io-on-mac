@@ -273,7 +273,10 @@ class RnlinkPhone:
     def dev_info_tlvs(self):
         # Android role so the glasses use the BLE/GATT path (no iAP2/MFi).
         return (tlv(0x10, bytes([2])) + tlv(0x11, PHONE_ADDR) + tlv(0x12, PHONE_NAME) +
-                tlv(0x13, bytes([2])) + tlv(0x14, b'RayNeo') + tlv(0x16, b'VirtualPhone'))
+                tlv(0x13, bytes([2])) + tlv(0x14, b'RayNeo') + tlv(0x16, b'VirtualPhone') +
+                # Strix OS 1.0.6.11 parses 7 TLVs in a row and silently drops a shorter version request
+                # (the official Android app adds 0x1b=0); 1.0.4.12 ignores the extra tag.
+                tlv(0x1b, bytes([0])))
 
     def auth_hash(self, rand, local_addr):
         return hashlib.sha256(rand + PHONE_ADDR + local_addr + AUTH_KEY).digest()
@@ -306,6 +309,12 @@ class RnlinkPhone:
             cmd = payload[0]; data = payload[3:]
             self.on_rnlink_cmd(cmd, data)
         elif business == 0x13:
+            self.sub_bus = 0x13
+            self.on_aisubtitle(payload)
+        elif business == 0x17 and os.environ.get('QA_SCRIPT'):
+            # 有问必答 (ConversationAssist) speaks the same PbMsg/JSON shapes as AiSubtitle on business 0x17.
+            self.sub_bus = 0x17
+            os.environ['SUB_SCRIPT'] = os.environ['QA_SCRIPT']
             self.on_aisubtitle(payload)
         elif business == 0x0d:
             self.on_assistant(payload)
@@ -341,7 +350,7 @@ class RnlinkPhone:
                          'target_language': st.get('target_language', 'zh-CN'),
                          'save_audio': st.get('save_audio', False),
                          'direction': st.get('direction', 'ahead')}}
-            self.tx(0x13, pb_msg(2, message=json.dumps(reply)))
+            self.tx(getattr(self, 'sub_bus', 0x13), pb_msg(2, message=json.dumps(reply)))
             self.say('rnlink AiSubtitle -> START_REPLY (accept) sid=%s' % sid)
             self.caption_sid = sid
             # Stream a short scripted transcript; re-pushed on each weather tick so a caption is
@@ -354,6 +363,15 @@ class RnlinkPhone:
             self.caption_idx = 0
             self.caption_seq = 1
             self.caption_tick = 0
+            # SUB_SCRIPT=<json>: replay a timed caption script instead of the demo lines (research runs).
+            # [{"at": seconds after START_REPLY, "type": PbMsg type, "msg": {...}}]; "$sid" is replaced.
+            if os.environ.get('SUB_SCRIPT'):
+                self.caption_lines = None
+                self.sub_script = json.load(open(os.environ['SUB_SCRIPT']))
+                self.sub_t0 = None
+                self.sub_i = 0
+                self.say('rnlink AiSubtitle script: %d steps' % len(self.sub_script))
+                return
             # mode 2 = bilingual (source + translation both shown); status 1 = ongoing, so the
             # caption stays on screen (status 2 is "final" and reverts the view to listening).
             self.push_caption(*self.caption_lines[0], seq=self.caption_seq, mode=2, status=1)
@@ -471,6 +489,18 @@ class RnlinkPhone:
         except Exception:
             text = msg.hex()
         self.say('rnlink %s type=%s msg=%s' % (BUSINESS.get(business, hex(business)), typ, text))
+        if business == 0x0e and typ == 1 and __import__('os').environ.get('REC_ACK'):
+            # REC_ACK=<type>: research probe, acknowledge the glasses' recorder start (RECORD_CMD) like a phone would.
+            import json
+            try:
+                m = json.loads(text)
+            except Exception:
+                m = {}
+            if m.get('action') == 1 and m.get('code') == 1:
+                ack = {'uuid': m.get('uuid', ''), 'action': 1, 'mode': m.get('mode', 1), 'code': int(__import__('os').environ.get('REC_ACK_CODE', '1')),
+                       'sid': m.get('sid', ''), 'type': m.get('type', 1), 'text': ''}
+                self.say('rnlink RECORD_CMD -> ack type=%s %s' % (__import__('os').environ['REC_ACK'], ack))
+                self.tx(0x0e, pb_msg(int(__import__('os').environ['REC_ACK']), message=json.dumps(ack)))
         if business != 0x0f:
             return
         # SPARE_SGD1=<json file {arg: {key: value}}>: answer a Spare app's data request (SGE1 event 12 op 3) with a
@@ -531,6 +561,22 @@ class RnlinkPhone:
         # until its analytics uploader races ("pack size mismatch", heap assert in rayneo_analyticslog).
         if 'current_weather_request' in text:
             self.push_weather()
+
+    def on_event(self, n):
+        """Every BLE connection event (SUB_EVENT_S seconds of virtual time each): timed caption script."""
+        script = getattr(self, 'sub_script', None)
+        if not script:
+            return
+        import json
+        if self.sub_t0 is None:
+            self.sub_t0 = n
+        dt = float(os.environ.get('SUB_EVENT_S', '0.03'))
+        while self.sub_i < len(script) and (n - self.sub_t0) * dt >= script[self.sub_i]['at']:
+            st = script[self.sub_i]; self.sub_i += 1
+            text = json.dumps(st['msg'], ensure_ascii=False).replace('$sid', getattr(self, 'caption_sid', ''))
+            self.caption_seq = getattr(self, 'caption_seq', 0) + 1
+            self.say('rnlink AiSubtitle script[%d] t=%.2f type=%d %s' % (self.sub_i - 1, st['at'], st['type'], text[:160]))
+            self.tx(getattr(self, 'sub_bus', 0x13), pb_msg(st['type'], message=text, sequence=self.caption_seq))
 
     def on_tick(self):
         """Periodic phone-side work, called by the BLE central every few connection events (virtual
@@ -816,6 +862,27 @@ class RnlinkPhone:
                 # voice assistant as available (otherwise it shows "连接手机 App 后重试").
                 import json as _j
                 self.tx(0x0d, pb_msg(31, message=_j.dumps({'major': 5, 'minor': 0})))
+                if os.environ.get('REC_PHONE_START'):     # research probe: phone-initiated recording (fresh uuid)
+                    import json as _jp, uuid as _uu, time as _tt
+                    _m = {'uuid': _uu.uuid4().hex, 'action': 1, 'mode': 1, 'code': int(os.environ.get('REC_PHONE_CODE', '1')),
+                          'sid': str(int(_tt.time())), 'type': 1, 'text': ''}
+                    self.tx(0x0e, pb_msg(1, message=_jp.dumps(_m)))
+                    self.say('rnlink -> RECORD_CMD phone start %s' % _m)
+                if os.environ.get('MIC_PERM'):            # research probe: phone grants the glasses microphone
+                    self.push_general_setting('microphone_permission', value=1)
+                if os.environ.get('RECO_JSON'):           # research probe: 智能推荐看板 (航班/打车) cards
+                    import json as _jr
+                    for _k, _d in enumerate(_jr.load(open(os.environ['RECO_JSON']))):
+                        _p = _d['__payload'] if '__payload' in _d else {'value': 0, 'mode': 0, 'data': _jr.dumps(_d, ensure_ascii=False)}
+                        self.tx(0x0f, pb_msg(int(os.environ.get('RECO_TYPE', '19')), message=_jr.dumps(
+                            {'cmd': 'recommend_update', 'payload': _p}, ensure_ascii=False)))
+                        self.say('rnlink -> recommend_update %s' % list(_d))
+                if os.environ.get('LIFELOG_ON'):          # research probe: phone turns 全天智记 on
+                    import json as _jj
+                    # LAUNCHER_CMD type 21 carries the lifelog commands both ways (glasses report lifelog_switch on 0x15)
+                    self.tx(0x0f, pb_msg(int(os.environ.get('LIFELOG_TYPE', '21')), message=_jj.dumps(
+                        {'cmd': 'life_log_switch', 'payload': {'value': 1, 'mode': 0, 'data': ''}})))
+                    self.say('rnlink -> life_log_switch on (LAUNCHER_CMD type %s)' % os.environ.get('LIFELOG_TYPE', '21'))
                 if getattr(self, 'record_demo', False):
                     # Bind the crown double-click to "start recording" (action 3) so a double-click
                     # starts an on-glasses recording (default double-click is the AI assistant).

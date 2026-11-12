@@ -45,6 +45,9 @@ namespace Antmicro.Renode.Peripherals.Sensors
                 }
                 latched=false; MotionIRQ.Set(true);            // no more motion: release the line
                 return 0x00;
+            // Config1: bits 7/3 are self-clearing (reset / busy) on the chip. Strix OS 1.0.6.11's init reads it back
+            // after its register table and fails "config1 not ready" while (value & 0x88) != 0.
+            case 0x06: return (byte)(registers[0x06]&0x77);
             case 0x12: return latched?(byte)(((latchX>>8)<<4)|(latchY>>8)):(byte)0;
             case 0x03: return latched?(byte)latchX:(byte)0;
             case 0x04: return latched?(byte)latchY:(byte)0;

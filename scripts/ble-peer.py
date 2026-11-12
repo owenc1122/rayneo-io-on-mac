@@ -83,8 +83,15 @@ class Central:
         self.events += 1
         if self.events % TICK_EVENTS == 0 and getattr(self, 'rn', None):
             self.rn.on_tick()
+        if getattr(self, 'rn', None) and hasattr(self.rn, 'on_event'):
+            self.rn.on_event(self.events)
         if not self.queue and self.gatt_step:
             self.gatt_next()
+        if getattr(self, 'handshake_at', None) is not None and self.events >= self.handshake_at:
+            self.handshake_at = None
+            self.say('starting rnlink handshake')
+            if self.rn:
+                self.rn.start()
         if self.queue:
             llid, payload = self.queue.pop(0)
             return llid, payload
@@ -301,8 +308,15 @@ class Central:
             return
         if self.gatt_step == 'follow':
             if not self.followups:
-                self.say('GATT client idle; starting rnlink handshake')
                 self.gatt_step = None
+                # HANDSHAKE_EVENTS=<n>: wait n connection events first. Strix OS 1.0.6.11 parks its dev-info reply
+                # and drops it ("no available connection") when the request beats its own GATT-connected state.
+                delay = int(os.environ.get('HANDSHAKE_EVENTS', '0') or 0)
+                if delay > 0:
+                    self.handshake_at = self.events + delay
+                    self.say('GATT client idle; rnlink handshake in %d events' % delay)
+                    return
+                self.say('GATT client idle; starting rnlink handshake')
                 if self.rn:
                     self.rn.start()
                 return

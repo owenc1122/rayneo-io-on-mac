@@ -65,7 +65,7 @@ def main():
                 raise SystemExit(f'{name}: no build-info trailer')
             addr = struct.unpack('<I', data[-4:])[0]
             first = struct.unpack('<I', data[:4])[0]
-            if first != 0xFFFFFFFF:
+            if first not in (0xFFFFFFFF, BOOT_MAGIC):  # 1.0.6.11 nuttx_ota.bin ships with the magic already
                 raise SystemExit(f'{name}: first word {first:#x}, expected erased OTA header')
             if addr in RAM_LOADED:
                 # Not executed in place: the AP copies it from NOR into RAM.

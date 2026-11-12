@@ -9,6 +9,19 @@ def at(path):
     return '@' + str(path).replace(' ', '\\ ')
 extra = sys.argv[4] if len(sys.argv) > 4 else ''
 lines = []
+# Per-firmware hook addresses. 1.0.4.12 comes from its embedded symbol table; 1.0.6.11 has no symbol table, so
+# its addresses were found by matching the 1.0.4.12 function bytes (BL/literal offsets masked, one unique hit each).
+# FW_PROFILE is set by emulate.sh from the AP image MD5 in OtaFileInfo.json.
+PROFILES = {
+    '1.0.4.12': dict(ap_out=0x10b734, ap_syslog=0x105ca280, delay_us=0x0011492c, delay_ns=0x0012f450,
+                     bth_i=0x03002fc0, bth_s=0x0c04a3c8, bth_v=0x0c040678, c1_i=0x00102adc, c1_v=0x10d0a008,
+                     c1_idle=0x00103cb8),
+    '1.0.6.11': dict(ap_out=0x10b870, ap_syslog=0x104ae968, delay_us=0x00114a68, delay_ns=0x0012f9e4,
+                     bth_i=None, bth_s=None, bth_v=0x0c040cc0, c1_i=None, c1_v=0x10d0f550, c1_idle=None),
+}
+P = PROFILES[__import__('os').environ.get('FW_PROFILE') or '1.0.4.12']
+def hk(cpu, key, body):
+    return [] if P[key] is None else ['%s AddHook 0x%08x """%s"""' % (cpu, P[key], body)]
 for name in (root / 'platform/peripherals.list').read_text().split():
     lines.append(f'include {at(root / "platform/peripherals" / (name + ".cs"))}')
 printf = (root / 'platform/hooks/printf.py').read_text()
@@ -127,33 +140,22 @@ lines += [
     # deep sleep (seconds after any activity). Send it down the firmware's own light-sleep path instead
     # (0x103b5c: WFI with SLEEPDEEP clear, then the normal return). The PM state only changes in code
     # that an interrupt runs, and every interrupt ends the WFI. IDLE_SPIN=1 keeps the spinning.
-] + ([] if __import__('os').environ.get('IDLE_SPIN') == '1' else [
+] + ([] if __import__('os').environ.get('IDLE_SPIN') == '1' or P['c1_idle'] is None else [
     'c1 AddHook 0x00103cb8 "self.PC = Antmicro.Renode.Peripherals.CPU.RegisterValue.Create(0x103b5d, 32)"',
     # AP busy-wait delays on the 6 MHz counter (sysCmu +0x288): hal_sys_timer_delay_us(us) and
     # hal_sys_timer_delay_ns(ns) are 4-instruction loops reading the counter ~50 times per emulated
     # microsecond, each read a model call. The hook returns to the caller and lets the core skip exactly
     # the requested time (interrupts arriving meanwhile are taken afterwards). DELAY_SPIN=1 keeps them.
 ]) + ([] if __import__('os').environ.get('DELAY_SPIN') == '1' else [
-    'cpu AddHook 0x0011492c """' + delay_hook('us') + '"""',
-    'cpu AddHook 0x0012f450 """' + delay_hook('ns') + '"""',
+] + hk('cpu', 'delay_us', delay_hook('us')) + hk('cpu', 'delay_ns', delay_hook('ns')) + [
 ]) + [
 ] + (['dma BlockCopy false'] if __import__('os').environ.get('DMA_BLOCK') == '0' else []) + (['aonCmu PollHalt false'] if __import__('os').environ.get('AON_POLL') == '0' else []) + [
     'cpu SP 0x202fffe0',
     'cpu PC 0x10190010',
 ] + ([] if __import__('os').environ.get('HOOKS') == '0' else [
     # AP trace hooks (HOOKS=0 leaves them out); addresses are from the 1.0.4.12 symbol table.
-    'cpu AddHook 0x10b734 """' + out_hook + '"""',
-    'cpu AddHook 0x105ca280 """' + syslog_hook + '"""',
-    # BTH hal_trace_printf_internal(attr, fmt, va_list): flash 0x0c003550, copied (by -0x590) to and
-    # executed from SRAM alias 0x03002fc0 by the BTH reset code.
-    'bth AddHook 0x03002fc0 """' + bth_hook('i') + '"""',
-    # BTH vsyslog(prio, fmt, va_list) 0x0c04a3c8 and nx_vsyslog 0x0c040678.
-    'bth AddHook 0x0c04a3c8 """' + bth_hook('s') + '"""',
-    'bth AddHook 0x0c040678 """' + bth_hook('v') + '"""',
-    # M55C1 hal_trace_printf_internal: flash 0x10c135c0, copied to its ITCM at 0x00102adc.
-    'c1 AddHook 0x00102adc """' + c1_hook('i') + '"""',
-    # M55C1 nx_vsyslog at 0x10d0a008 (veneer target from its trace path).
-    'c1 AddHook 0x10d0a008 """' + c1_hook('v') + '"""',
+] + hk('cpu', 'ap_out', out_hook) + hk('cpu', 'ap_syslog', syslog_hook) + hk('bth', 'bth_i', bth_hook('i'))
+  + hk('bth', 'bth_s', bth_hook('s')) + hk('bth', 'bth_v', bth_hook('v')) + hk('c1', 'c1_i', c1_hook('i')) + hk('c1', 'c1_v', c1_hook('v')) + [
 ]) + ([] if not __import__('os').environ.get('C1DBG') else [
     'c1 AddHook 0x10cfed54 """\nbus=machine.SystemBus\nr0=self.GetRegister(0).RawValue\nprint(\'[C1DBG] rx_by_chan r0=0x%x cfg=0x%x lr=0x%x\' % (r0, bus.ReadDoubleWord(r0), self.GetRegister(14).RawValue))\n"""',
     'c1 AddHook 0x10cff780 """\nbus=machine.SystemBus\nr0=self.GetRegister(0).RawValue\nprint(\'[C1DBG] rx_irq cfg=0x%x name=0x%x inst=0x%x lr=0x%x\' % (r0, bus.ReadDoubleWord(r0), bus.ReadDoubleWord(r0+0x10), self.GetRegister(14).RawValue))\n"""',
