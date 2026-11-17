@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CoreImage
 import Foundation
 
@@ -110,6 +111,12 @@ import Foundation
     }
 
     var projectName: String? { builder?.project.lastPathComponent }
+
+    private var portalWatch: AnyCancellable?
+    /// Lets the phone's DevTool connect the embedded glasses simulator by itself (no invitation to paste).
+    func attach(_ portal: PortalSimulator, port: UInt16 = 10_002) {
+        portalWatch = portal.$invitation.removeDuplicates().sink { [core] text in core.setSimulator(invitation: text, port: port) }
+    }
 
     func stopApp() { core.command("app.stop") }
     func restartApp() { core.command("app.restart") }

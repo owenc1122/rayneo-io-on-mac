@@ -35,6 +35,7 @@ import UniformTypeIdentifiers
     func startDevMode(project: URL) {
         portal.onLog = { [weak self] text, isError in self?.console.append(.aapp, isError ? .error : .info, text) }
         portal.start(port: 10002)
+        dev.attach(portal, port: 10002)
         dev.onLog = { [weak self] text, isError in self?.console.append(.aapp, isError ? .error : .info, text) }
         do { try dev.start() } catch { console.append(.aapp, .error, "开发服务启动失败：\(error.localizedDescription)") }
         dev.open(project: project)

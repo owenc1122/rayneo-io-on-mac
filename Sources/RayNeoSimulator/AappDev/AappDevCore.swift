@@ -93,6 +93,12 @@ final class AappDevCore {
         return token
     }()
     private var controllers: [AappDevHTTPConnection] = []
+    /// The embedded glasses simulator (lvgl_host, port 10002): its current `rapp-slave://` invitation, kept fresh
+    /// by the main actor. Lets DevTool connect it by itself (`/simulators`, `simulatorAutoStart`) — no pasting.
+    private var simulatorInvitation = ""
+    private var simulatorPort: UInt16 = 10_002
+    /// Commands forwarded to a phone whose `command.result` answers an HTTP request (requestId -> waiter).
+    private var waiters: [String: (http: AappDevHTTPConnection, extra: [String: Any], timer: DispatchSourceTimer)] = [:]
     /// Bonjour instance name and the computer name shown on the phone.
     let computerName = Host.current().localizedName ?? "Mac"
 
@@ -368,7 +374,13 @@ final class AappDevCore {
         case ("POST", let rest) where rest.count == 3 && rest[0] == "commands" && rest[2] == "result":
             let body = request.jsonBody() ?? [:]
             http.respond(200, json: AappDevProtocol.json(["ok": true]))
+            if let waiter = waiters.removeValue(forKey: rest[1]) {
+                waiter.timer.cancel()
+                waiter.http.respond(200, json: AappDevProtocol.json(body.merging(waiter.extra) { a, _ in a }))
+            }
             for (line, isError) in AappDevProtocol.describeTelemetry(body.merging(["type": "command.result"]) { a, _ in a }) { log(line, error: isError) }
+        case ("POST", ["simulators"]):
+            simulators(request, http, device)
         case ("DELETE", ["connection"]):
             http.respond(200, json: AappDevProtocol.json(["ok": true]))
             devices[device.id] = nil
@@ -425,7 +437,7 @@ final class AappDevCore {
         let welcome: [String: Any] = [
             "type": "welcome", "protocol": AappDevProtocol.version, "serverId": saved.serverId,
             "connectionId": device.id, "token": credential, "afterSeq": 0,
-            "maxPackageBytes": AappDevProtocol.maxPackageBytes, "capabilities": ["display-status.v1"],
+            "maxPackageBytes": AappDevProtocol.maxPackageBytes, "capabilities": ["simulator": true, "simulatorAutoStart": true],
             "appId": appId, "manifest": manifest ?? [:],
             "identity": ["serverId": saved.serverId, "fingerprint": tls.map { AappDevProtocol.base64url($0.fingerprint) } ?? "",
                          "computer": computerName, "persistent": true],
@@ -522,6 +534,58 @@ final class AappDevCore {
                 requests[id]?.state = "expired"; emit?(.pairingResolved(id: id))
             }
             if entry.expiresAt.addingTimeInterval(300) < now { requests[id] = nil }
+        }
+    }
+
+    // MARK: embedded simulator (`POST /dev/device-connections/<id>/simulators`, as `rapp dev`)
+
+    func setSimulator(invitation: String, port: UInt16) {
+        queue.async { [self] in simulatorInvitation = invitation; simulatorPort = port }
+    }
+
+    private static let simulatorId = "io-on-mac"
+
+    private func simulatorInstance(address: String) -> [String: Any]? {
+        guard let sha = URLComponents(string: simulatorInvitation)?.queryItems?.first(where: { $0.name == "sha256" })?.value,
+              !sha.isEmpty else { return nil }
+        return ["instanceId": Self.simulatorId,
+                "process": ["state": "running", "transport": "tcp", "program": "lvgl_host", "listening": true],
+                "identity": ["certificateSha256": sha],
+                "route": ["address": address, "port": Int(simulatorPort)]]
+    }
+
+    private func simulators(_ request: AappDevRequest, _ http: AappDevHTTPConnection, _ device: Device) {
+        let action = request.jsonBody()?["action"] as? String ?? ""
+        // The phone reaches the simulator the way it reaches this server (127.0.0.1 over USB, else the LAN address).
+        let address = http.isLoopback ? "127.0.0.1"
+            : String((request.headers["host"] ?? "").split(separator: ":").first ?? "127.0.0.1")
+        guard let instance = simulatorInstance(address: address) else {
+            http.respond(200, json: AappDevProtocol.json(["ok": false, "code": "SIMULATOR_UNAVAILABLE", "message": "眼镜模拟器还没准备好"])); return
+        }
+        switch action {
+        case "start", "status", "stop":
+            http.respond(200, json: AappDevProtocol.json(["ok": true].merging(instance) { a, _ in a }))
+        case "list":
+            http.respond(200, json: AappDevProtocol.json(["ok": true, "instances": [instance]]))
+        case "connect":
+            let requestId = "r" + AappDevProtocol.randomHex(bytes: 8)
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now() + 15)
+            timer.setEventHandler { [weak self] in
+                guard let self, let waiter = self.waiters.removeValue(forKey: requestId) else { return }
+                waiter.http.respond(200, json: AappDevProtocol.json(["ok": false, "code": "COMMAND_UNKNOWN", "message": "Command result is unconfirmed"]))
+            }
+            waiters[requestId] = (http, ["instanceId": Self.simulatorId], timer)
+            timer.resume()
+            enqueue(device, ["type": "glassLink.connect", "requestId": requestId,
+                             "expiresAt": Int64(Date().addingTimeInterval(15).timeIntervalSince1970 * 1000),
+                             "request": ["transport": "tcp", "invitation": simulatorInvitation,
+                                         "route": instance["route"]!,
+                                         "simulator": ["instanceId": Self.simulatorId,
+                                                       "certificateSha256": (instance["identity"] as! [String: Any])["certificateSha256"]!]]])
+            log("让 \(device.deviceName) 连接眼镜模拟器（\(address):\(simulatorPort)）")
+        default:
+            http.respond(400, json: AappDevProtocol.errorBody("Unknown simulator action"))
         }
     }
 
