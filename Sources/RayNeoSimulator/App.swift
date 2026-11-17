@@ -5,17 +5,27 @@ struct RayNeoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var firmware = FirmwareModel()
     @StateObject private var devices = DeviceHub()
+    /// nil until the developer picks 固件模式 or 开发模式 (`--dev <folder>` / RAYNEO_DEV_PROJECT opens 开发模式 directly).
+    @State private var mode: LaunchMode? = LaunchMode.fromLaunchArguments()
     var body: some Scene {
         // One window, one emulator: closing it quits the app (and saves the glasses state), so the app can
         // never be left running in the Dock with no window and the emulator still burning CPU.
         Window("RayNeo io on Mac", id: "main") {
-            SimulatorView(firmware: firmware, devices: devices)
-                .onAppear {
-                    delegate.firmware = firmware; delegate.devices = devices
-                    devices.console = firmware.console; devices.start()
-                    firmware.boot()
-                    firmware.startAapp()
+            Group {
+                switch mode {
+                case nil:
+                    ModeChooser { chosen in mode = chosen; start(chosen) }
+                case .firmware:
+                    SimulatorView(firmware: firmware, devices: devices)
+                case .dev:
+                    DevModeView(firmware: firmware)
                 }
+            }
+            .onAppear {
+                delegate.firmware = firmware; delegate.devices = devices
+                devices.console = firmware.console; devices.start()
+                if let mode { start(mode) }
+            }
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 760, height: 440)
@@ -88,6 +98,38 @@ struct RayNeoApp: App {
             CommandMenu("声音") {
                 Toggle("语音唤醒「小雷小雷」（手机 App 里的同名设置）", isOn: $firmware.voiceWakeup)
             }
+        }
+    }
+}
+
+enum LaunchMode: Equatable {
+    case firmware
+    /// 开发模式: no firmware, only the rApp's glasses picture from the phone Host.
+    case dev(URL)
+
+    static func fromLaunchArguments() -> LaunchMode? {
+        let arguments = ProcessInfo.processInfo.arguments
+        if let index = arguments.firstIndex(of: "--dev"), index + 1 < arguments.count {
+            return .dev(URL(fileURLWithPath: arguments[index + 1], isDirectory: true))
+        }
+        if let path = ProcessInfo.processInfo.environment["RAYNEO_DEV_PROJECT"], !path.isEmpty {
+            return .dev(URL(fileURLWithPath: path, isDirectory: true))
+        }
+        return nil
+    }
+}
+
+extension RayNeoApp {
+    @MainActor func start(_ mode: LaunchMode) {
+        switch mode {
+        case .firmware:
+            firmware.boot()
+            firmware.startAapp()
+        case .dev(let project):
+            // No Renode: only the display link (10002) and the dev server (17890, adb reverse by DeviceHub).
+            firmware.startAapp()
+            firmware.dev.open(project: project)
+            firmware.console.append(.aapp, .info, "开发模式：\(project.path)")
         }
     }
 }

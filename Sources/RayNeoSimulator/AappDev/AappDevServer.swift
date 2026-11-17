@@ -7,7 +7,8 @@ import Foundation
 /// Host automatically, with its logs streamed back. The phone reaches this Mac at 127.0.0.1 over
 /// `adb reverse tcp:<port> tcp:<port>` / the iPhone USB bridge, or at the Mac's LAN address.
 @MainActor final class AappDevServer: ObservableObject {
-    nonisolated static let defaultPort: UInt16 = 17_890
+    /// 17890 (ONE_CLICK_PROTOCOL §2); `RAPP_DEV_PORT` overrides it (e.g. while `rapp dev` holds 17890).
+    nonisolated static let defaultPort: UInt16 = ProcessInfo.processInfo.environment["RAPP_DEV_PORT"].flatMap { UInt16($0) } ?? 17_890
 
     @Published private(set) var paired = false
     @Published private(set) var deviceName: String?

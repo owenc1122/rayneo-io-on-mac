@@ -45,6 +45,8 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>NSSpeechRecognitionUsageDescription</key><string>在本机识别唤醒词「小雷小雷」/"OK RayNeo"，代替眼镜音频 DSP 的唤醒词算法。只用设备端识别，声音不上传。</string>
 <key>NSBluetoothAlwaysUsageDescription</key><string>「真机经 Mac 蓝牙连接眼镜」时，让手机通过 Mac 的蓝牙连接模拟器里的眼镜。</string>
 <key>NSMicrophoneUsageDescription</key><string>把 Mac 麦克风的声音交给模拟眼镜的原固件（录音、语音助手）。声音只在本机处理。</string>
+<key>NSLocalNetworkUsageDescription</key><string>开发模式在局域网里广播这台 Mac，让手机 Host 一键连接。</string>
+<key>NSBonjourServices</key><array><string>_rapp-dev._tcp</string></array>
 </dict></plist>
 PLIST
 codesign --force --deep --sign - "$app"

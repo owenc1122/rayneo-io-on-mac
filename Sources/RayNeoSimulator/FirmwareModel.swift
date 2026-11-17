@@ -23,7 +23,7 @@ import UniformTypeIdentifiers
     let console = LogConsole()
     /// Aapp display link (port 10002): the RayNeo Aapp Host on a phone draws SDK apps on this simulator.
     let aapp = AappDisplay()
-    /// aapp-dev.v3 server (port 10443): the phone's DevTools pairs with it and installs/runs/reloads .aapk builds.
+    /// rapp-dev.v3 server (port 17890): the phone's DevTools pairs with it (one-click connect) and installs/runs/reloads builds.
     let dev = AappDevServer()
     @Published var showPairing = false
 
