@@ -32,6 +32,11 @@ struct RayNeoApp: App {
         .defaultPosition(.center)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(after: .help) {
+                Button("开发模式按键说明") {
+                    let alert = NSAlert(); alert.messageText = "开发模式按键"; alert.informativeText = DevModeView.keyHelp; alert.runModal()
+                }
+            }
             CommandGroup(after: .saveItem) {
                 Button("保存眼镜截图…") { firmware.saveScreenshot() }.keyboardShortcut("s")
                 Button("导出日志…") { firmware.console.export() }

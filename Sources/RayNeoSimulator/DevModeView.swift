@@ -51,25 +51,23 @@ struct DevModeView: View {
         console = firmware.console; aapp = firmware.portal; dev = firmware.dev
     }
 
+    /// The status chip fades out a few seconds after the glasses picture connects; any status change shows it again.
+    @State private var chipShown = true
+    static let keyHelp = "↑↓ / 滚轮 旋转 · 回车 / 空格 确认 · Esc 返回 · ⇧⌘Y 日志"
+
     var body: some View {
-        VSplitView {
-            VStack(spacing: 0) {
-                glasses
-                HStack(spacing: 10) {
-                    chip
-                    Spacer()
-                    Text("↑↓ / 滚轮 旋转 · 回车 / 空格 确认 · Esc 返回 · ⇧⌘Y 日志").font(.caption).foregroundStyle(.tertiary).lineLimit(1)
-                }
-                .padding(.horizontal, 10).padding(.vertical, 6)
-            }
-            .frame(minHeight: 260)
+        VStack(spacing: 0) {
+            glasses
             if console.visible {
                 LogConsoleView(console: console).frame(minHeight: 120, idealHeight: 200)
             }
         }
-        .frame(minWidth: 580, minHeight: 300)
+        .background(Color.black)
         .preferredColorScheme(.dark)
+        // The picture fills the window; the console opens on demand (⇧⌘Y).
+        .onAppear { console.visible = false }
         .background(DevKeyCatcher(aapp: aapp))
+        .background(DevWindowShape(aspect: CGSize(width: aapp.width, height: aapp.height), locked: !console.visible))
         .sheet(isPresented: Binding(get: { dev.pendingRequest != nil }, set: { if !$0 { dev.resolvePending(approve: false) } })) {
             PairingApprovalSheet(dev: dev)
         }
@@ -77,33 +75,48 @@ struct DevModeView: View {
 
     private var glasses: some View {
         GeometryReader { geometry in
-            ZStack {
+            ZStack(alignment: .bottomLeading) {
                 Color.black
                 if let frame = aapp.frame {
                     Image(decorative: frame, scale: 1)
-                        .resizable().interpolation(.high).scaledToFit()
+                        .resizable().interpolation(.high)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
                         .accessibilityLabel("眼镜画面")
                         .gesture(SpatialTapGesture().onEnded { tap in
-                            let size = CGSize(width: frame.width, height: frame.height)
-                            let scale = min(geometry.size.width / size.width, geometry.size.height / size.height)
-                            let origin = CGPoint(x: (geometry.size.width - size.width * scale) / 2, y: (geometry.size.height - size.height * scale) / 2)
-                            aapp.sendTap(x: (tap.location.x - origin.x) / scale, y: (tap.location.y - origin.y) / scale)
+                            aapp.sendTap(x: tap.location.x * CGFloat(frame.width) / geometry.size.width,
+                                         y: tap.location.y * CGFloat(frame.height) / geometry.size.height)
                         })
-                }
-                if !aapp.connected {
+                } else {
+                    // Only before the core's first frame: afterwards the core draws its own screens.
                     VStack(spacing: 6) {
                         Text(placeholderTitle).font(.system(size: 20, weight: .medium))
-                        Text(placeholderDetail).font(.callout).opacity(0.7)
+                        if !placeholderDetail.isEmpty { Text(placeholderDetail).font(.callout).opacity(0.7) }
                     }
                     .foregroundStyle(Color(red: 0.2, green: 1, blue: 0.4))
-                    .multilineTextAlignment(.center).padding()
+                    .multilineTextAlignment(.center)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
                 }
+                chip
+                    .padding(6)
+                    .opacity(chipShown ? 1 : 0)
+                    .animation(.easeOut(duration: 0.6), value: chipShown)
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .aspectRatio(CGFloat(aapp.width) / CGFloat(aapp.height), contentMode: .fit)
-        .frame(minWidth: 540, minHeight: 220)
-        .background(Color.black)
+        .frame(minWidth: 270, minHeight: 110)
+        .help(Self.keyHelp)
+        .onHover { inside in if inside { showChip() } }
+        .onAppear { showChip() }
+        .onChange(of: chipText) { _ in showChip() }
+    }
+
+    private func showChip() {
+        chipShown = true
+        let text = chipText
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+            if aapp.connected, chipText == text { chipShown = false }
+        }
     }
 
     private var placeholderTitle: String {
@@ -118,20 +131,57 @@ struct DevModeView: View {
         return dev.paired ? "" : "手机 Host → 开发工具 → 附近的电脑 → 连接"
     }
 
-    private var chip: some View {
+    private var chipText: String {
         // Connected = the phone Host drives the glasses picture (lvgl_host status); the dev link names the phone.
-        let connected = aapp.connected
-        let text = connected
+        let base = aapp.connected
             ? "已连接 · \(dev.deviceName ?? "手机") · \(dev.paired ? (dev.wired ? "有线" : "局域网") : "眼镜画面")"
             : (dev.building ? "构建中…" : (dev.paired ? "已连接开发服务 · \(dev.deviceName ?? "手机")" : "未连接"))
-        return HStack(spacing: 6) {
-            Circle().fill(connected ? Color.green : Color.secondary).frame(width: 7, height: 7)
-            Text(text).font(.caption.weight(.medium)).lineLimit(1)
-            if let project = dev.projectName { Text("· \(project)").font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+        return dev.projectName.map { "\(base) · \($0)" } ?? base
+    }
+
+    private var chip: some View {
+        HStack(spacing: 5) {
+            Circle().fill(aapp.connected ? Color.green : Color.secondary).frame(width: 6, height: 6)
+            Text(chipText).font(.system(size: 10, weight: .medium)).lineLimit(1)
         }
-        .padding(.horizontal, 10).padding(.vertical, 4)
-        .background(Capsule().fill(Color.white.opacity(0.08)))
-        .foregroundStyle(connected ? Color.green : Color.primary)
+        .padding(.horizontal, 7).padding(.vertical, 2)
+        .background(Capsule().fill(Color.black.opacity(0.55)))
+        .foregroundStyle(aapp.connected ? Color.green : Color.white.opacity(0.85))
+        .allowsHitTesting(false)
+    }
+}
+
+/// Locks the window's content to the glasses aspect (540×220) while the console is hidden, so the picture fills
+/// the window edge to edge; the first appearance sizes the content to 2× (1080×440).
+struct DevWindowShape: NSViewRepresentable {
+    let aspect: CGSize
+    let locked: Bool
+    func makeNSView(context: Context) -> NSView { ShapeView() }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard let view = nsView as? ShapeView else { return }
+        view.aspect = aspect; view.locked = locked
+        DispatchQueue.main.async { view.apply() }
+    }
+    final class ShapeView: NSView {
+        var aspect = CGSize(width: 540, height: 220)
+        var locked = true
+        private var sized = false
+        override func viewDidMoveToWindow() { apply() }
+        func apply() {
+            guard let window, aspect.width > 0, aspect.height > 0 else { return }
+            window.backgroundColor = .black
+            if locked {
+                window.contentAspectRatio = aspect
+                if !sized {
+                    sized = true
+                    window.setContentSize(NSSize(width: aspect.width * 2, height: aspect.height * 2))
+                } else if let content = window.contentView?.frame.size, content.width > 0 {
+                    window.setContentSize(NSSize(width: content.width, height: content.width * aspect.height / aspect.width))
+                }
+            } else {
+                window.resizeIncrements = NSSize(width: 1, height: 1)
+            }
+        }
     }
 }
 
