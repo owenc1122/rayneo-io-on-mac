@@ -44,11 +44,11 @@ struct ModeChooser: View {
 struct DevModeView: View {
     @ObservedObject var firmware: FirmwareModel
     @ObservedObject private var console: LogConsole
-    @ObservedObject private var aapp: AappDisplay
+    @ObservedObject private var aapp: PortalSimulator
     @ObservedObject private var dev: AappDevServer
     init(firmware: FirmwareModel) {
         self.firmware = firmware
-        console = firmware.console; aapp = firmware.aapp; dev = firmware.dev
+        console = firmware.console; aapp = firmware.portal; dev = firmware.dev
     }
 
     var body: some View {
@@ -89,7 +89,8 @@ struct DevModeView: View {
                             let origin = CGPoint(x: (geometry.size.width - size.width * scale) / 2, y: (geometry.size.height - size.height * scale) / 2)
                             aapp.sendTap(x: (tap.location.x - origin.x) / scale, y: (tap.location.y - origin.y) / scale)
                         })
-                } else {
+                }
+                if !aapp.connected {
                     VStack(spacing: 6) {
                         Text(placeholderTitle).font(.system(size: 20, weight: .medium))
                         Text(placeholderDetail).font(.callout).opacity(0.7)
@@ -108,7 +109,8 @@ struct DevModeView: View {
     private var placeholderTitle: String {
         if dev.building { return "正在构建 \(dev.projectName ?? "工程")…" }
         if dev.buildFailed { return "构建失败" }
-        return dev.paired ? "正在打开应用…" : "等待手机连接"
+        if !aapp.running { return "眼镜模拟器未启动" }
+        return aapp.connected || dev.paired ? "正在打开应用…" : "等待手机连接"
     }
 
     private var placeholderDetail: String {
@@ -117,10 +119,11 @@ struct DevModeView: View {
     }
 
     private var chip: some View {
-        let connected = dev.paired
+        // Connected = the phone Host drives the glasses picture (lvgl_host status); the dev link names the phone.
+        let connected = aapp.connected
         let text = connected
-            ? "已连接 · \(dev.deviceName ?? "手机") · \(dev.wired ? "有线" : "局域网")"
-            : (dev.building ? "构建中…" : "未连接")
+            ? "已连接 · \(dev.deviceName ?? "手机") · \(dev.paired ? (dev.wired ? "有线" : "局域网") : "眼镜画面")"
+            : (dev.building ? "构建中…" : (dev.paired ? "已连接开发服务 · \(dev.deviceName ?? "手机")" : "未连接"))
         return HStack(spacing: 6) {
             Circle().fill(connected ? Color.green : Color.secondary).frame(width: 7, height: 7)
             Text(text).font(.caption.weight(.medium)).lineLimit(1)
@@ -152,7 +155,7 @@ struct PairingApprovalSheet: View {
 
 /// Knob input for 开发模式: ↑↓ / scroll rotate, Return / Space confirm, Esc back, ← → as on the official simulator.
 struct DevKeyCatcher: NSViewRepresentable {
-    let aapp: AappDisplay
+    let aapp: PortalSimulator
     func makeNSView(context: Context) -> NSView {
         let view = CatcherView(); view.aapp = aapp
         DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
@@ -161,20 +164,22 @@ struct DevKeyCatcher: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 
     final class CatcherView: NSView {
-        weak var aapp: AappDisplay?
+        weak var aapp: PortalSimulator?
         private var scrollAccumulator: CGFloat = 0
         override var acceptsFirstResponder: Bool { true }
         override func viewDidMoveToWindow() { window?.makeFirstResponder(self) }
         override func keyDown(with event: NSEvent) {
             guard let aapp, event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { super.keyDown(with: event); return }
-            let key: AappKey?
+            let key: PortalWire.Key?
             switch event.keyCode {
             case 126: key = .up
             case 125: key = .down
             case 123: key = .left
             case 124: key = .right
-            case 36, 76, 49: key = event.isARepeat ? nil : .enter     // Return, keypad Enter, Space
-            case 53: key = event.isARepeat ? nil : .escape
+            case 36, 76, 49: key = event.isARepeat ? nil : .confirm   // Return, keypad Enter, Space
+            case 53: key = event.isARepeat ? nil : .back
+            case 51: key = event.isARepeat ? nil : .back               // Backspace (as in lvgl_host)
+            case 115: key = event.isARepeat ? nil : .home              // Home
             default: key = nil
             }
             if let key { MainActor.assumeIsolated { aapp.sendKey(key) } } else if !event.isARepeat { super.keyDown(with: event) }

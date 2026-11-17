@@ -83,6 +83,16 @@ final class AappDevCore {
     private let stateFile: URL
     private var trusted = RappDevTrusted.load()
     private var requests: [String: PairingRequest] = [:]
+    /// `/control/*` (§3): loopback only, Bearer = the token in devserver/control-token (0600).
+    private lazy var controlToken: String = {
+        let file = AappDevTLS.directory.appendingPathComponent("control-token")
+        if let text = try? String(contentsOf: file, encoding: .utf8), text.count >= 32 { return text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let token = AappDevProtocol.randomToken()
+        try? token.write(to: file, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        return token
+    }()
+    private var controllers: [AappDevHTTPConnection] = []
     /// Bonjour instance name and the computer name shown on the phone.
     let computerName = Host.current().localizedName ?? "Mac"
 
@@ -298,6 +308,25 @@ final class AappDevCore {
             http.respond(200, json: AappDevProtocol.json(discovery(wired: http.isLoopback))); return
         }
         if parts == ["dev", "pairing", "requests"], request.method == "POST" { pairingRequest(request, http); return }
+        if parts.first == "control" {
+            guard http.isLoopback, request.bearer == controlToken else { http.respond(401, json: AappDevProtocol.json(["error": ["code": "UNAUTHORIZED"]])); return }
+            if parts == ["control", "events"], request.method == "GET" {
+                controllers.removeAll { $0 === http }
+                controllers.append(http)
+                http.beginStream()
+                for entry in requests.values where entry.state == "pending" {
+                    http.streamWrite(controlFrame(["type": "pairing.request", "requestId": entry.id, "deviceName": entry.deviceName, "code": entry.code]))
+                }
+                return
+            }
+            if parts.count == 4, parts[1] == "pairing", parts[2] == "requests", request.method == "POST" {
+                guard requests[parts[3]]?.state == "pending" else { http.respond(404, json: AappDevProtocol.errorBody("Unknown pairing request")); return }
+                let approve = request.jsonBody()?["approve"] as? Bool ?? false
+                resolve(request: parts[3], approve: approve)
+                http.respond(200, json: AappDevProtocol.json(["ok": true])); return
+            }
+            http.respond(404, json: AappDevProtocol.errorBody("Not found")); return
+        }
         if parts.count == 4, parts[0] == "dev", parts[1] == "pairing", parts[2] == "requests", request.method == "GET" {
             expireRequests()
             guard let entry = requests[parts[3]] else { http.respond(404, json: AappDevProtocol.errorBody("Unknown pairing request")); return }
@@ -450,6 +479,7 @@ final class AappDevCore {
         http.respond(202, json: AappDevProtocol.json(["requestId": id, "code": code, "expiresAt": Int64(expires.timeIntervalSince1970 * 1000)]))
         log("\(deviceName) 请求连接 · 比对码 \(code)")
         emit?(.pairingRequest(id: id, deviceName: deviceName, code: code))
+        broadcastControl(["type": "pairing.request", "requestId": id, "deviceName": deviceName, "code": code])
     }
 
     /// The developer allowed (or refused) a pairing request on this Mac.
@@ -472,7 +502,17 @@ final class AappDevCore {
             }
             requests[id] = entry
             emit?(.pairingResolved(id: id))
+            broadcastControl(["type": "pairing.resolved", "requestId": id, "state": entry.state])
         }
+    }
+
+    private func controlFrame(_ event: [String: Any]) -> Data {
+        Data("event: \(event["type"] as? String ?? "message")\ndata: ".utf8) + AappDevProtocol.json(event) + Data("\n\n".utf8)
+    }
+
+    private func broadcastControl(_ event: [String: Any]) {
+        controllers.removeAll { !httpConnections.keys.contains($0.id) }
+        for controller in controllers { controller.streamWrite(controlFrame(event)) }
     }
 
     private func expireRequests() {

@@ -95,6 +95,9 @@ struct RayNeoApp: App {
                     Button("启动 iPhone 模拟器") { devices.launchIOSSimulator() }
                 }
             }
+            CommandMenu("开发模式") {
+                Button("手动连接：拷贝模拟器配对邀请") { firmware.copyPortalInvitation() }
+            }
             CommandMenu("声音") {
                 Toggle("语音唤醒「小雷小雷」（手机 App 里的同名设置）", isOn: $firmware.voiceWakeup)
             }
@@ -126,9 +129,8 @@ extension RayNeoApp {
             firmware.boot()
             firmware.startAapp()
         case .dev(let project):
-            // No Renode: only the display link (10002) and the dev server (17890, adb reverse by DeviceHub).
-            firmware.startAapp()
-            firmware.dev.open(project: project)
+            // No Renode: lvgl_host (child, port 10002) and the dev server (17890, adb reverse by DeviceHub).
+            firmware.startDevMode(project: project)
             firmware.console.append(.aapp, .info, "开发模式：\(project.path)")
         }
     }
@@ -139,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var devices: DeviceHub?
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationWillTerminate(_ notification: Notification) {
-        MainActor.assumeIsolated { devices?.stop(); firmware?.stopForQuit() }
+        MainActor.assumeIsolated { devices?.stop(); firmware?.portal.stop(); firmware?.stopForQuit() }
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
         // A window restored onto a display that is no longer connected would open invisibly.

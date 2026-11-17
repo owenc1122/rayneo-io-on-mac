@@ -27,6 +27,27 @@ import UniformTypeIdentifiers
     let dev = AappDevServer()
     @Published var showPairing = false
 
+    /// 开发模式 display: the official simulator core (lvgl_host) as a child, owning port 10002.
+    let portal = PortalSimulator()
+
+    /// 开发模式: no Renode and no plain-TCP 10002 listener — lvgl_host owns the phone link; the dev server builds
+    /// and deploys the project.
+    func startDevMode(project: URL) {
+        portal.onLog = { [weak self] text, isError in self?.console.append(.aapp, isError ? .error : .info, text) }
+        portal.start(port: 10002)
+        dev.onLog = { [weak self] text, isError in self?.console.append(.aapp, isError ? .error : .info, text) }
+        do { try dev.start() } catch { console.append(.aapp, .error, "开发服务启动失败：\(error.localizedDescription)") }
+        dev.open(project: project)
+    }
+
+    /// 手动连接: copies lvgl_host's current `rapp-slave://` invitation (paste it in the phone Host).
+    func copyPortalInvitation() {
+        let text = portal.invitation
+        guard !text.isEmpty else { console.append(.aapp, .warning, "模拟器还没有配对邀请"); return }
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+        console.append(.aapp, .info, "已拷贝模拟器配对邀请，粘贴到手机 Host 的连接页")
+    }
+
     /// Starts the Aapp display server once (the official Aapp Simulator must not be holding the port).
     func startAapp() {
         guard aapp.port == nil else { return }
