@@ -60,10 +60,16 @@ import Foundation
         guard !started else { return }
         try core.start()
         started = true
+        // iPhone over USB: the phone reaches this Mac at 127.0.0.1 (dev server + glasses simulator).
+        let bridge = IosUsbBridge(ports: [port, 10_002], hello: { [core] in core.usbHello() },
+                                  log: { [weak self] line in DispatchQueue.main.async { self?.onLog?(line, false) } })
+        bridge.start()
+        usbBridge = bridge
     }
 
     func stop() {
         guard started else { return }
+        usbBridge?.stop(); usbBridge = nil
         core.stop()
         started = false
     }
@@ -113,6 +119,7 @@ import Foundation
     var projectName: String? { builder?.project.lastPathComponent }
 
     private var portalWatch: AnyCancellable?
+    private var usbBridge: IosUsbBridge?
     /// Lets the phone's DevTool connect the embedded glasses simulator by itself (no invitation to paste).
     func attach(_ portal: PortalSimulator, port: UInt16 = 10_002) {
         portalWatch = portal.$invitation.removeDuplicates().sink { [core] text in core.setSimulator(invitation: text, port: port) }

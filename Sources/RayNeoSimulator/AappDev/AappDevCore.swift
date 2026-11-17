@@ -539,6 +539,11 @@ final class AappDevCore {
 
     // MARK: embedded simulator (`POST /dev/device-connections/<id>/simulators`, as `rapp dev`)
 
+    /// `RAPPUSB1` hello for the iPhone USB bridge (§5).
+    func usbHello() -> [String: Any] {
+        queue.sync { ["serverId": saved.serverId, "fingerprint": tls.map { AappDevProtocol.base64url($0.fingerprint) } ?? "", "computer": computerName] }
+    }
+
     func setSimulator(invitation: String, port: UInt16) {
         queue.async { [self] in simulatorInvitation = invitation; simulatorPort = port }
     }
