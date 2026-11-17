@@ -2,11 +2,11 @@ import Compression
 import CryptoKit
 import Foundation
 
-/// The computer side of the RayNeo Aapp developer link `aapp-dev.v3` (what `aapp dev` serves), as the Host's
+/// The computer side of the RayNeo rApp developer link `rapp-dev.v3` (what `rapp dev` serves), as the Host's
 /// DevTools app (com.rayneo.aapp.devtools) and runtime (dev_protocol.dart) expect it. Pure values and
 /// formatting only; no I/O, so it is unit-testable.
 enum AappDevProtocol {
-    static let version = "aapp-dev.v3"
+    static let version = "rapp-dev.v3"
     /// DevTools downloads packages in 16 KiB ranges and requires a 206 with exactly that many bytes.
     static let rangeBytes = 16 * 1024
     /// AappPackageManager.maxPackageBytes on the Host.
@@ -51,10 +51,10 @@ enum AappDevProtocol {
 
         var endpoint: String { "https://\(host):\(port)/dev" }
 
-        /// `aapp-dev://pair?v=3&e=<IPv4>:<port>&f=<base64url sha256>&t=<token>` (≤ 512 chars).
-        var compact: String { "aapp-dev://pair?v=3&e=\(host):\(port)&f=\(base64url(certificateSHA256))&t=\(token)" }
+        /// `rapp-dev://pair?v=3&e=<IPv4>:<port>&f=<base64url sha256>&t=<token>` (≤ 512 chars).
+        var compact: String { "rapp-dev://pair?v=3&e=\(host):\(port)&f=\(base64url(certificateSHA256))&t=\(token)" }
 
-        /// `aapp-dev://pair?data=<base64url(JSON)>`: the ticket returned by describe (also accepted directly).
+        /// `rapp-dev://pair?data=<base64url(JSON)>`: the ticket returned by describe (also accepted directly).
         var full: String {
             let json: [String: Any] = [
                 "v": 3,
@@ -67,7 +67,7 @@ enum AappDevProtocol {
                 "expiresAt": Int64(expiresAt.timeIntervalSince1970 * 1000),
             ]
             let data = (try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])) ?? Data()
-            return "aapp-dev://pair?data=\(base64url(data))"
+            return "rapp-dev://pair?data=\(base64url(data))"
         }
 
         /// Problems DevTools would reject the pairing for (empty = acceptable).
@@ -187,6 +187,30 @@ enum AappDevProtocol {
     }
 
     static func errorBody(_ message: String) -> Data { json(["error": ["message": message]]) }
+
+    /// The 6-digit comparison code both sides show while a phone asks to pair (ONE_CLICK_PROTOCOL §3):
+    /// sha256(fingerprint ‖ utf8(deviceId) ‖ nonce), first 4 bytes big-endian mod 1 000 000, zero-padded.
+    static func pairingCode(fingerprint: Data, deviceId: String, nonce: Data) -> String {
+        let digest = Array(SHA256.hash(data: fingerprint + Data(deviceId.utf8) + nonce))
+        let value = UInt32(digest[0]) << 24 | UInt32(digest[1]) << 16 | UInt32(digest[2]) << 8 | UInt32(digest[3])
+        return String(format: "%06u", value % 1_000_000)
+    }
+
+    /// base64url (no padding) → bytes.
+    static func base64urlDecode(_ text: String) -> Data? {
+        var s = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while s.count % 4 != 0 { s += "=" }
+        return Data(base64Encoded: s)
+    }
+
+    /// The manifest's version as text: rApp manifests carry `{"name": "1.0.0", "build": 3}`, older ones a string.
+    static func versionText(_ manifest: [String: Any]) -> String? {
+        if let text = manifest["version"] as? String { return text }
+        guard let version = manifest["version"] as? [String: Any] else { return nil }
+        let name = version["name"] as? String ?? ""
+        let build = (version["build"] as? NSNumber).map { "+\($0)" } ?? ""
+        return name.isEmpty ? nil : name + build
+    }
 }
 
 /// Minimal reader for one file of an .aapk (zip, stored or deflated): used to read aapp.json.
@@ -195,17 +219,19 @@ enum AapkReader {
         case notZip, missing(String), unsupported, tooLarge
         var errorDescription: String? {
             switch self {
-            case .notZip: return "不是有效的 .aapk（zip）文件"
-            case .missing(let name): return ".aapk 里没有 \(name)"
-            case .unsupported: return ".aapk 使用了不支持的压缩方式"
-            case .tooLarge: return ".aapk 超过 100 MB"
+            case .notZip: return "不是有效的应用包（zip）"
+            case .missing(let name): return "应用包里没有 \(name)"
+            case .unsupported: return "应用包使用了不支持的压缩方式"
+            case .tooLarge: return "应用包超过 100 MB"
             }
         }
     }
 
+    /// The package manifest: `manifest.json` in an .rpk (rApp), `aapp.json` in an older .aapk.
     static func manifest(of url: URL) throws -> [String: Any] {
-        let data = try entry("aapp.json", in: url)
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.missing("aapp.json") }
+        let name = url.pathExtension == "aapk" ? "aapp.json" : "manifest.json"
+        let data = try entry(name, in: url)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.missing(name) }
         return object
     }
 

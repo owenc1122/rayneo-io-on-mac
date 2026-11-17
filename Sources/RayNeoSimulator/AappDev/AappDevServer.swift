@@ -1,17 +1,26 @@
 import CoreImage
 import Foundation
 
-/// Developer server for the RayNeo Aapp DevTools 「扫码连接电脑」 flow (`aapp-dev.v3`, what `aapp dev` serves):
-/// pair a phone once, then every .aapk you choose (or every new build in a watched project) is downloaded,
-/// verified, installed and run on the phone's Host automatically, with its logs streamed back.
-/// The phone reaches this Mac at 127.0.0.1 over `adb reverse tcp:<port> tcp:<port>` (or the Mac's LAN IPv4).
+/// Developer server for the rApp DevTools (`rapp-dev.v3`, what `rapp dev` serves) with one-click connect: the
+/// phone finds this Mac (Bonjour `_rapp-dev._tcp` or 127.0.0.1 over USB), asks to pair, the developer compares the
+/// 6-digit code and allows it once; after that every build of the open project is installed and run on the phone's
+/// Host automatically, with its logs streamed back. The phone reaches this Mac at 127.0.0.1 over
+/// `adb reverse tcp:<port> tcp:<port>` / the iPhone USB bridge, or at the Mac's LAN address.
 @MainActor final class AappDevServer: ObservableObject {
-    nonisolated static let defaultPort: UInt16 = 10_443
+    nonisolated static let defaultPort: UInt16 = 17_890
 
     @Published private(set) var paired = false
     @Published private(set) var deviceName: String?
     @Published private(set) var status = "开发服务未启动"
     @Published private(set) var lastDeploy: String?
+    /// Phone waiting for the developer to allow it (shown as a sheet with the comparison code).
+    @Published private(set) var pendingRequest: (id: String, deviceName: String, code: String)?
+    /// The connected phone reaches this Mac over USB.
+    @Published private(set) var wired = false
+    /// Building the open project right now.
+    @Published private(set) var building = false
+    @Published private(set) var buildFailed = false
+    private var builder: RappProjectBuilder?
     /// Dev-link events and the app's own log entries, ready for a console: (line, isError).
     var onLog: ((String, Bool) -> Void)?
 
@@ -33,6 +42,9 @@ import Foundation
         case .state(let paired, let device, let status):
             self.paired = paired; self.deviceName = device; self.status = status
         case .deployed(let text): lastDeploy = text
+        case .pairingRequest(let id, let name, let code): pendingRequest = (id, name, code)
+        case .pairingResolved(let id): if pendingRequest?.id == id { pendingRequest = nil }
+        case .connection(_, let wired): self.wired = wired
         }
     }
 
@@ -71,6 +83,27 @@ import Foundation
 
     /// Save-to-reload: deploys the newest `build/*.aapk` of the project now and on every change.
     func watch(projectDirectory: URL) { core.watch(projectDirectory) }
+
+    /// Allow / refuse the pending pairing request.
+    func resolvePending(approve: Bool) {
+        guard let request = pendingRequest else { return }
+        core.resolve(request: request.id, approve: approve)
+        pendingRequest = nil
+    }
+
+    /// 开发模式: builds the project now and whenever its sources change (`npm run build` / `npx --no-install rapp
+    /// build`), and deploys every new `build/*.rpk`.
+    func open(project: URL) {
+        builder?.stop()
+        let builder = RappProjectBuilder(project: project)
+        builder.onLog = { [weak self] line, isError in self?.onLog?(line, isError) }
+        builder.onState = { [weak self] building, failed in self?.building = building; self?.buildFailed = failed }
+        self.builder = builder
+        core.watch(project)
+        builder.start()
+    }
+
+    var projectName: String? { builder?.project.lastPathComponent }
 
     func stopApp() { core.command("app.stop") }
     func restartApp() { core.command("app.restart") }

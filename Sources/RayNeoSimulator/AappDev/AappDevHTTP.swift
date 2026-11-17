@@ -93,6 +93,18 @@ final class AappDevHTTPConnection {
     private var pendingWrites = 0
     private let queue: DispatchQueue
 
+    /// The phone reached this Mac over loopback (adb reverse or the iPhone USB bridge): a wired link.
+    var isLoopback: Bool {
+        if case .hostPort(let host, _) = connection.endpoint {
+            switch host {
+            case .ipv4(let address): return address.isLoopback
+            case .ipv6(let address): return address.isLoopback || "\(address)".hasSuffix("127.0.0.1")
+            default: return false
+            }
+        }
+        return false
+    }
+
     init(_ connection: NWConnection, queue: DispatchQueue) {
         self.connection = connection
         self.queue = queue

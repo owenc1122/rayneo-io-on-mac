@@ -15,7 +15,7 @@ final class AappDevProtocolTests: XCTestCase {
         let text = p.compact
         XCTAssertLessThanOrEqual(text.count, 512)
         let components = try XCTUnwrap(URLComponents(string: text))
-        XCTAssertEqual(components.scheme, "aapp-dev"); XCTAssertEqual(components.host, "pair")
+        XCTAssertEqual(components.scheme, "rapp-dev"); XCTAssertEqual(components.host, "pair")
         let q = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
         XCTAssertEqual(q["v"], "3")
         XCTAssertEqual(q["e"], "127.0.0.1:10443")
@@ -141,5 +141,21 @@ final class AappDevProtocolTests: XCTestCase {
         XCTAssertEqual(try AapkReader.entry("main.js", in: dir.appendingPathComponent("app.aapk")).count, 5000)
         XCTAssertThrowsError(try AapkReader.entry("missing.txt", in: dir.appendingPathComponent("app.aapk")))
         XCTAssertThrowsError(try AapkReader.entry("aapp.json", inZip: Data("not a zip at all, definitely not".utf8)))
+    }
+
+    /// ONE_CLICK_PROTOCOL §3 comparison code. Vector: fp = 0x00…0x1f, deviceId "dev-1", nonce = 0xa0…0xaf.
+    func testPairingCodeVector() {
+        let fp = Data((0..<32).map { UInt8($0) }), nonce = Data((0xa0...0xaf).map { UInt8($0) })
+        let code = AappDevProtocol.pairingCode(fingerprint: fp, deviceId: "dev-1", nonce: nonce)
+        print("PAIRING_CODE_VECTOR \(code)")
+        XCTAssertEqual(code.count, 6)
+        XCTAssertTrue(code.allSatisfy(\.isNumber))
+        XCTAssertEqual(code, "327692")  // independently computed with Python hashlib
+    }
+
+    func testRpkVersionText() {
+        XCTAssertEqual(AappDevProtocol.versionText(["version": ["name": "1.2.0", "build": 7]]), "1.2.0+7")
+        XCTAssertEqual(AappDevProtocol.versionText(["version": "0.1.0"]), "0.1.0")
+        XCTAssertNil(AappDevProtocol.versionText([:]))
     }
 }

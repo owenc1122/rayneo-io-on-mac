@@ -2,13 +2,30 @@ import CryptoKit
 import Foundation
 import Network
 
-/// Server side of `aapp-dev.v3`. Lives on its own serial queue; reports to the main-actor facade through
+/// Server side of `rapp-dev.v3` plus one-click connect (ONE_CLICK_PROTOCOL §1–3: shared computer identity,
+/// Bonjour `_rapp-dev._tcp`, `/dev/discovery`, computer-approved pairing). Lives on its own serial queue; reports to the main-actor facade through
 /// `events`. Bounded: ≤ 8 device connections, ≤ 200 buffered SSE events each, ≤ 3 packages kept for download.
 final class AappDevCore {
     enum Event {
         case log(String, Bool)
         case state(paired: Bool, device: String?, status: String)
         case deployed(String)
+        /// A phone asks to pair: show `code` and let the developer allow or refuse it.
+        case pairingRequest(id: String, deviceName: String, code: String)
+        case pairingResolved(id: String)
+        /// The connected phone, and whether it reaches this Mac over USB (loopback: adb reverse / USB bridge).
+        case connection(device: String?, wired: Bool)
+    }
+
+    /// One computer-approved pairing request (§3), valid 2 minutes.
+    struct PairingRequest {
+        let id: String
+        let deviceId: String
+        let deviceName: String
+        let code: String
+        let expiresAt: Date
+        var state = "pending"          // pending | approved | rejected | expired
+        var token: String?
     }
 
     struct Package {
@@ -31,6 +48,7 @@ final class AappDevCore {
         var lastSeen = Date()
         var sessionReady = false
         var reportedBuilds: Set<String> = []
+        var wired = false
         init(id: String, token: String, credential: String, appId: String, deviceId: String, deviceName: String) {
             self.id = id; self.token = token; self.credential = credential
             self.appId = appId; self.deviceId = deviceId; self.deviceName = deviceName
@@ -63,6 +81,10 @@ final class AappDevCore {
     private var watched: (dir: URL, signature: String, stableSince: Date?, deployedSignature: String)?
     private var housekeeping: DispatchSourceTimer?
     private let stateFile: URL
+    private var trusted = RappDevTrusted.load()
+    private var requests: [String: PairingRequest] = [:]
+    /// Bonjour instance name and the computer name shown on the phone.
+    let computerName = Host.current().localizedName ?? "Mac"
 
     init(port: UInt16, directory: URL = AappDevTLS.directory) {
         self.port = port
@@ -81,13 +103,18 @@ final class AappDevCore {
     func start() throws {
         let identity = try AappDevTLS.load()
         tls = identity
+        if saved.serverId != identity.serverId { saved.serverId = identity.serverId; save() }
         guard let nwPort = NWEndpoint.Port(rawValue: port) else { throw NWError.posix(.EINVAL) }
         let listener = try NWListener(using: identity.parameters(), on: nwPort)
+        listener.service = bonjourService()
+        listener.serviceRegistrationUpdateHandler = { [weak self] change in
+            if case .add = change { self?.log("局域网可发现：\(self?.computerName ?? "")") }
+        }
         listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
         listener.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
-            case .ready: self.log("开发服务已启动：https://0.0.0.0:\(self.port)/dev（证书指纹 \(AappDevProtocol.hex(identity.fingerprint).prefix(16))…）")
+            case .ready: self.log("开发服务已启动：https://0.0.0.0:\(self.port)/dev（电脑 \(self.computerName)，serverId \(identity.serverId.prefix(8))…，证书指纹 \(AappDevProtocol.hex(identity.fingerprint).prefix(16))…）")
                 self.publish()
             case .failed(let error): self.log("开发服务启动失败：\(error)（端口 \(self.port) 被占用？）", error: true)
             default: break
@@ -124,7 +151,7 @@ final class AappDevCore {
                NSDictionary(dictionary: pairing.manifest).isEqual(to: manifest) { return pairing }
             let fresh = AappDevProtocol.Pairing(host: host, port: port, certificateSHA256: tls.fingerprint,
                                                 token: AappDevProtocol.randomToken(), serverId: saved.serverId,
-                                                computer: Host.current().localizedName ?? "Mac", manifest: manifest,
+                                                computer: computerName, manifest: manifest,
                                                 expiresAt: Date().addingTimeInterval(600))
             pairing = fresh
             return fresh
@@ -145,14 +172,14 @@ final class AappDevCore {
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
         let manifest = try AapkReader.manifest(of: url)
         guard let appId = manifest["package"] as? String, !appId.isEmpty, appId.count <= 128,
-              let version = manifest["version"] as? String, !version.isEmpty, version.count <= 64 else {
-            throw AapkReader.Failure.missing("aapp.json 的 package / version")
+              let version = AappDevProtocol.versionText(manifest), !version.isEmpty, version.count <= 64 else {
+            throw AapkReader.Failure.missing("manifest.json 的 package / version")
         }
         if let previous = self.manifest?["package"] as? String, previous != appId {
-            log("换了应用（\(previous) → \(appId)）：手机需要重新配对", error: true)
-            for device in devices.values { enqueue(device, ["type": "session.end"]) }
+            // §1: one identity for every project; trusted phones resume and take the new appId from welcome.
+            log("换了应用（\(previous) → \(appId)）：已连接的手机重新连接后切换到新应用")
+            for device in devices.values { enqueue(device, ["type": "session.end"]); device.stream?.endStream() }
             devices.removeAll()
-            saved.credentials = [:]
             pairing = nil
         }
         if self.manifest == nil || !NSDictionary(dictionary: self.manifest!).isEqual(to: manifest) { pairing = nil }
@@ -170,10 +197,11 @@ final class AappDevCore {
         packageOrder.append(deployment.deploymentId)
         while packageOrder.count > 3 { packages[packageOrder.removeFirst()] = nil }
         current = package
+        listener?.service = bonjourService()
         log("准备部署 \(appId) \(version)（\(url.lastPathComponent)，\(data.count) 字节，构建 \(deployment.buildId)）")
         emit?(.deployed("\(appId) \(version) · \(deployment.buildId)"))
         let ready = devices.values.filter { $0.sessionReady && $0.appId == appId }
-        if ready.isEmpty { log(devices.isEmpty ? "等手机配对后自动安装（设备 → 配对手机）" : "等手机连上后自动安装") }
+        if ready.isEmpty { log(devices.isEmpty ? "等手机连接后自动安装（手机 Host → 开发工具 → 附近的电脑）" : "等手机连上后自动安装") }
         for device in ready { sendDeploy(to: device) }
         publish()
     }
@@ -209,12 +237,12 @@ final class AappDevCore {
             timer.setEventHandler { [weak self] in self?.pollWatched() }
             timer.resume()
             watchTimer = timer
-            log("监视 \(directory.path) 的构建输出（build/*.aapk），有新包就自动部署")
+            log("监视 \(directory.path) 的构建输出（build/*.rpk），有新包就自动部署")
             let (url, sig) = signature(of: directory)
             if let url, !sig.isEmpty {
                 do { try deployNow(url) } catch { log("部署失败：\(error.localizedDescription)", error: true) }
             } else {
-                log("还没有构建输出：在项目目录运行 npm run build 后会自动部署")
+                log("还没有构建输出：构建完成后会自动部署")
             }
         }
     }
@@ -224,7 +252,7 @@ final class AappDevCore {
         var candidates: [URL] = []
         for dir in [directory.appendingPathComponent("build"), directory] {
             candidates += (try? files.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]))?
-                .filter { $0.pathExtension == "aapk" } ?? []
+                .filter { $0.pathExtension == "rpk" || $0.pathExtension == "aapk" } ?? []
         }
         let newest = candidates.max { a, b in
             ((try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
@@ -263,7 +291,20 @@ final class AappDevCore {
     }
 
     private func route(_ request: AappDevRequest, _ http: AappDevHTTPConnection) {
+        // Browsers may not talk to the dev server (same rule as `rapp dev`).
+        if request.headers["origin"] != nil { http.respond(403, json: AappDevProtocol.json(["error": ["code": "FORBIDDEN"]])); return }
         let parts = request.path.split(separator: "/").map { $0.removingPercentEncoding ?? String($0) }
+        if parts == ["dev", "discovery"], request.method == "GET" {
+            http.respond(200, json: AappDevProtocol.json(discovery(wired: http.isLoopback))); return
+        }
+        if parts == ["dev", "pairing", "requests"], request.method == "POST" { pairingRequest(request, http); return }
+        if parts.count == 4, parts[0] == "dev", parts[1] == "pairing", parts[2] == "requests", request.method == "GET" {
+            expireRequests()
+            guard let entry = requests[parts[3]] else { http.respond(404, json: AappDevProtocol.errorBody("Unknown pairing request")); return }
+            var body: [String: Any] = ["state": entry.state]
+            if entry.state == "approved", let token = entry.token { body["token"] = token }
+            http.respond(200, json: AappDevProtocol.json(body)); return
+        }
         // /dev/pairing/describe
         if parts == ["dev", "pairing", "describe"], request.method == "POST" {
             guard let pairing, request.bearer == pairing.token, pairing.expiresAt > Date() else {
@@ -323,37 +364,125 @@ final class AappDevCore {
         guard let body = request.jsonBody(), let bearer = request.bearer else {
             http.respond(400, json: AappDevProtocol.errorBody("Bad request")); return
         }
+        let deviceId = String((body["deviceId"] as? String ?? "phone").prefix(128))
+        let deviceName = String((body["deviceName"] as? String ?? "手机").prefix(128))
         let viaPairing = pairing.map { bearer == $0.token && $0.expiresAt > Date() } ?? false
-        let credentialApp = saved.credentials[bearer]
-        guard viaPairing || credentialApp != nil else {
-            http.respond(401, json: AappDevProtocol.errorBody("Pairing expired; pair again on the computer")); return
+        // §1: a trusted phone resumes with its credential whatever app it last ran; welcome tells it the current one.
+        let resumed = trusted.device(deviceId: deviceId, credential: bearer) != nil
+        guard viaPairing || resumed else {
+            http.respond(401, json: AappDevProtocol.json(["error": ["code": "PAIRING_REQUIRED", "message": "Pair again on the computer"]])); return
         }
         guard body["protocol"] as? String == AappDevProtocol.version, body["serverId"] as? String == saved.serverId else {
             http.respond(409, json: AappDevProtocol.errorBody("Wrong developer server")); return
         }
-        let appId = String((body["appId"] as? String ?? "").prefix(128))
-        guard appId == (manifest?["package"] as? String), credentialApp == nil || credentialApp == appId else {
-            http.respond(409, json: AappDevProtocol.errorBody("This computer is serving another app; pair again")); return
+        guard let appId = manifest?["package"] as? String else {
+            http.respond(409, json: AappDevProtocol.errorBody("No project is open on the computer yet")); return
         }
-        let deviceId = String((body["deviceId"] as? String ?? "phone").prefix(128))
-        let deviceName = String((body["deviceName"] as? String ?? "手机").prefix(128))
         // One live connection per phone: a reconnect replaces the old one.
         for old in devices.values where old.deviceId == deviceId { old.stream?.endStream(); devices[old.id] = nil }
         while devices.count >= 8, let oldest = devices.values.min(by: { $0.lastSeen < $1.lastSeen }) { oldest.stream?.cancel(); devices[oldest.id] = nil }
-        let credential = credentialApp != nil ? bearer : AappDevProtocol.randomToken()
-        if credentialApp == nil {
-            saved.credentials[credential] = appId
-            if saved.credentials.count > 16 { saved.credentials.remove(at: saved.credentials.startIndex) }
-            save()
+        let credential = resumed ? bearer : AappDevProtocol.randomToken()
+        if resumed { trusted.touch(deviceId: deviceId, deviceName: deviceName) }
+        else {
+            trusted.trust(deviceId: deviceId, deviceName: deviceName, credential: credential)
+            pairing = nil    // one-time token
         }
-        let device = Device(id: AappDevProtocol.randomHex(bytes: 16), token: AappDevProtocol.randomToken(),
+        trusted.save()
+        // As in `rapp dev`, the credential from welcome is the bearer for this connection's requests.
+        let device = Device(id: AappDevProtocol.randomHex(bytes: 16), token: credential,
                             credential: credential, appId: appId, deviceId: deviceId, deviceName: deviceName)
+        device.wired = http.isLoopback
         devices[device.id] = device
-        http.respond(200, json: AappDevProtocol.json(["token": device.token, "connectionId": device.id, "afterSeq": 0]))
-        enqueue(device, ["type": "welcome", "protocol": AappDevProtocol.version, "serverId": saved.serverId,
-                         "token": credential, "capabilities": ["display-status.v1"]])
+        let welcome: [String: Any] = [
+            "type": "welcome", "protocol": AappDevProtocol.version, "serverId": saved.serverId,
+            "connectionId": device.id, "token": credential, "afterSeq": 0,
+            "maxPackageBytes": AappDevProtocol.maxPackageBytes, "capabilities": ["display-status.v1"],
+            "appId": appId, "manifest": manifest ?? [:],
+            "identity": ["serverId": saved.serverId, "fingerprint": tls.map { AappDevProtocol.base64url($0.fingerprint) } ?? "",
+                         "computer": computerName, "persistent": true],
+        ]
+        http.respond(201, json: AappDevProtocol.json(welcome))
         log(viaPairing ? "手机 \(deviceName) 已配对（\(appId)）" : "手机 \(deviceName) 重新连上")
         publish()
+    }
+
+    // MARK: one-click connect (§2–3)
+
+    /// `GET /dev/discovery` (no auth; shown on the phone before it pins the certificate).
+    private func discovery(wired: Bool) -> [String: Any] {
+        ["v": 1, "serverId": saved.serverId, "fingerprint": tls.map { AappDevProtocol.base64url($0.fingerprint) } ?? "",
+         "computer": computerName, "appId": manifest?["package"] as? String ?? "", "appName": appName,
+         "transport": wired ? "usb" : "lan"]
+    }
+
+    private var appName: String {
+        if let name = manifest?["name"] as? String, !name.hasPrefix("@") { return name }
+        return manifest?["package"] as? String ?? ""
+    }
+
+    /// Bonjour `_rapp-dev._tcp` with the §2.1 TXT record.
+    private func bonjourService() -> NWListener.Service {
+        var txt = NWTXTRecord()
+        txt["v"] = "1"
+        txt["sid"] = saved.serverId
+        txt["fp"] = tls.map { AappDevProtocol.base64url($0.fingerprint) } ?? ""
+        txt["name"] = computerName
+        txt["app"] = manifest?["package"] as? String ?? ""
+        txt["appName"] = appName
+        return NWListener.Service(name: computerName, type: "_rapp-dev._tcp", domain: nil, txtRecord: txt)
+    }
+
+    private func pairingRequest(_ request: AappDevRequest, _ http: AappDevHTTPConnection) {
+        expireRequests()
+        guard let body = request.jsonBody(), let deviceId = body["deviceId"] as? String, !deviceId.isEmpty, deviceId.count <= 128,
+              let nonceText = body["nonce"] as? String, let nonce = AappDevProtocol.base64urlDecode(nonceText), nonce.count == 16,
+              let tls else {
+            http.respond(400, json: AappDevProtocol.errorBody("Bad pairing request")); return
+        }
+        guard requests.values.filter({ $0.state == "pending" }).count < 4 else {
+            http.respond(429, json: AappDevProtocol.errorBody("Too many pairing requests")); return
+        }
+        let deviceName = String((body["deviceName"] as? String ?? "手机").prefix(128))
+        let code = AappDevProtocol.pairingCode(fingerprint: tls.fingerprint, deviceId: deviceId, nonce: nonce)
+        let id = AappDevProtocol.randomToken(bytes: 16)
+        let expires = Date().addingTimeInterval(120)
+        requests[id] = PairingRequest(id: id, deviceId: deviceId, deviceName: deviceName, code: code, expiresAt: expires)
+        http.respond(202, json: AappDevProtocol.json(["requestId": id, "code": code, "expiresAt": Int64(expires.timeIntervalSince1970 * 1000)]))
+        log("\(deviceName) 请求连接 · 比对码 \(code)")
+        emit?(.pairingRequest(id: id, deviceName: deviceName, code: code))
+    }
+
+    /// The developer allowed (or refused) a pairing request on this Mac.
+    func resolve(request id: String, approve: Bool) {
+        queue.async { [self] in
+            expireRequests()
+            guard var entry = requests[id], entry.state == "pending" else { return }
+            if approve {
+                guard let manifest, let tls else { log("还没有可运行的应用，无法允许连接", error: true); return }
+                // The approved phone gets a one-time pairing token and continues with describe → device-connections.
+                let fresh = AappDevProtocol.Pairing(host: "127.0.0.1", port: port, certificateSHA256: tls.fingerprint,
+                                                    token: AappDevProtocol.randomToken(), serverId: saved.serverId,
+                                                    computer: computerName, manifest: manifest, expiresAt: Date().addingTimeInterval(300))
+                pairing = fresh
+                entry.state = "approved"; entry.token = fresh.token
+                log("已允许 \(entry.deviceName) 连接")
+            } else {
+                entry.state = "rejected"
+                log("已拒绝 \(entry.deviceName) 的连接请求")
+            }
+            requests[id] = entry
+            emit?(.pairingResolved(id: id))
+        }
+    }
+
+    private func expireRequests() {
+        let now = Date()
+        for (id, entry) in requests {
+            if entry.state == "pending", entry.expiresAt < now {
+                requests[id]?.state = "expired"; emit?(.pairingResolved(id: id))
+            }
+            if entry.expiresAt.addingTimeInterval(300) < now { requests[id] = nil }
+        }
     }
 
     private func telemetry(_ body: [String: Any], from device: Device) {
@@ -386,6 +515,7 @@ final class AappDevCore {
     }
 
     private func tick() {
+        expireRequests()
         let now = Date()
         for device in devices.values {
             if now.timeIntervalSince(device.lastSeen) > 50 {
@@ -412,9 +542,10 @@ final class AappDevCore {
         if listener == nil { status = "开发服务未启动" }
         else if let device = live.first { status = "已连接 \(device.deviceName)" + (current.map { " · \($0.deployment.appId)" } ?? "") }
         else if !devices.isEmpty { status = "手机连接中…" }
-        else if manifest == nil { status = "选择一个 .aapk 后即可配对手机" }
-        else { status = "等待手机配对（端口 \(port)）" }
+        else if manifest == nil { status = "等待构建完成" }
+        else { status = "等待手机连接" }
         emit?(.state(paired: !live.isEmpty, device: live.first?.deviceName, status: status))
+        emit?(.connection(device: live.first?.deviceName, wired: live.first?.wired ?? false))
     }
 
     private func log(_ text: String, error: Bool = false) { emit?(.log(text, error)) }
