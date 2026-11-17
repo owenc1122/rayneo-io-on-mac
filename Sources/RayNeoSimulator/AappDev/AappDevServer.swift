@@ -1,3 +1,4 @@
+import AppKit
 import CoreImage
 import Foundation
 
@@ -43,7 +44,11 @@ import Foundation
         case .state(let paired, let device, let status):
             self.paired = paired; self.deviceName = device; self.status = status
         case .deployed(let text): lastDeploy = text
-        case .pairingRequest(let id, let name, let code): pendingRequest = (id, name, code)
+        case .pairingRequest(let id, let name, let code):
+            pendingRequest = (id, name, code)
+            // 把窗口带到前台，确保确认框真的被看到。
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.requestUserAttention(.criticalRequest)
         case .pairingResolved(let id): if pendingRequest?.id == id { pendingRequest = nil }
         case .connection(_, let wired): self.wired = wired
         }

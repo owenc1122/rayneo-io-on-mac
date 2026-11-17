@@ -195,7 +195,8 @@ struct PairingApprovalSheet: View {
             Text("确认手机上显示的是同一组数字再允许。").font(.callout).foregroundStyle(.secondary)
             HStack {
                 Button("拒绝") { dev.resolvePending(approve: false) }.keyboardShortcut(.cancelAction)
-                Button("允许") { dev.resolvePending(approve: true) }.keyboardShortcut(.defaultAction)
+                // 不绑回车：回车也是旋钮「单击」，绑上会让一次按键误批准配对。允许必须用鼠标点。
+                Button("允许") { dev.resolvePending(approve: true) }
             }
         }
         .padding(24).frame(width: 360)
