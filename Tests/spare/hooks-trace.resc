@@ -1,0 +1,6 @@
+# 004 验证用：在原厂唤醒词入口打印调用者（LR 在 0x1a1xxxxx = Spare 模块），只读不改
+cpu AddHook 0x106bb6c8 "print('[BENCH] call apply_voice_wake_state lr=0x%x' % self.GetRegister(14).RawValue)"
+cpu AddHook 0x106b8f18 "print('[BENCH] call AudioAdapter::resetWakeupResource lr=0x%x' % self.GetRegister(14).RawValue)"
+cpu AddHook 0x106b62f4 "print('[BENCH] call assistant_notify_enable_wakeup lr=0x%x' % self.GetRegister(14).RawValue)"
+cpu AddHook 0x106b8c20 "print('[BENCH] call AudioAdapter::enableWakeup lr=0x%x' % self.GetRegister(14).RawValue)"
+cpu AddHook 0x106b8d2c "print('[BENCH] call AudioAdapter::disableWakeup lr=0x%x' % self.GetRegister(14).RawValue)"

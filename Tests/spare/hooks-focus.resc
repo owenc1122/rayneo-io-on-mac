@@ -1,0 +1,8 @@
+# 勿扰守卫：原厂 StateMonitorAdapter::isFocusModeEnabled 一律返回 1（模拟原厂专注模式/勿扰开着）
+cpu AddHook 0x106baf9c """
+from Antmicro.Renode.Peripherals.CPU import RegisterValue
+lr = self.GetRegister(14).RawValue
+if (lr & 0xff000000) == 0x1a000000: print('[BENCH] isFocusModeEnabled -> 1 (caller Spare lr=0x%x)' % lr)
+self.SetRegister(0, RegisterValue.Create(1, 32))
+self.PC = RegisterValue.Create(lr, 32)
+"""
