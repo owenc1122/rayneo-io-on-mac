@@ -34,6 +34,8 @@ HH:MM:SS SGE1 event=<事件号> caps=<b12>.<b16><b17><b18><b19> len=<字节数> 
 例：`SGE1 event=16 caps=3f.ffbf0e00 len=32 raw=5347453101100000…` —— 事件 16，byte 19 = 0x00、byte 18 = 0x0e。
 
 找事件 16 的能力位：`grep 'SGE1 event=16 ' peer.log`。
+事件 15 / 16（能力上报）只在手机发能力查询之后出现：`spare-ai.sga` op 9 WAKE、decision 3（App 连上后会发）。验证台脚本里要看能力位，
+就在开头加一步发这个文件（生成器见 spare-feedback-desk `state/emu-verify-2026-11-22/emu-peer-1/mk_caps_query.py`，44 字节）。
 
 ### 拼不完整的帧
 
