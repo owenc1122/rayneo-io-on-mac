@@ -14,6 +14,7 @@ GATT database, and answers the glasses' own GATT client requests with "attribute
 import argparse, os, socket, struct, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rnlink
+import rnlink_reasm
 import bredr
 
 LL_VERSION_IND, LL_UNKNOWN_RSP, LL_FEATURE_REQ, LL_FEATURE_RSP = 0x0c, 0x07, 0x08, 0x09
@@ -45,7 +46,7 @@ class Central:
         self.last_read = 0
         self.notify_handle = -1
         self.write_handle = -1
-        self.rn_pending = []            # rnlink GATT reassembly: list of incomplete frames (glasses -> phone)
+        self.reasm = rnlink_reasm.Reassembler(self._deliver, self.say)   # rnlink GATT reassembly (glasses -> phone)
         self.rn = None                  # RnlinkPhone, attached by main()
         self.log_raw = False            # dump raw notify chunks (debug)
         self.glasses_addr = b''
@@ -251,46 +252,12 @@ class Central:
         self.gatt_step = 'follow'
 
     # ---- rnlink transport ----------------------------------------------------------------------
-    # The glasses interleave GATT notifications: a complete small frame can arrive between the start
-    # and the continuation notifications of a larger frame. Continuation notifications never begin with
-    # 0xaa55 (the payload is protobuf/JSON, bytes < 0x80), so a notification that starts with aa55 is a
-    # new frame (complete, or the start of a multi-notification one) and one that does not is a
-    # continuation of the pending multi-notification frame.
+    # Notifications of several frames interleave, and a frame's tail can arrive before its own head
+    # (ctrl 98 / 101 in the 942-byte notice run); scripts/rnlink_reasm.py assigns chunks by length and CRC.
     def on_rnlink_chunk(self, data):
         if self.log_raw:
-            self.say('raw chunk len=%d %s' % (len(data), data.hex()))
-        data = bytes(data)
-        # The glasses interleave notifications: a complete small frame, or a second frame's start, can
-        # land between the chunks of a big (telemetry) frame. Continuations never begin with 0xaa55, so
-        # an 0xaa55 chunk is always a new frame; a continuation is assigned to the pending frame it VALIDLY
-        # completes (CRC-checked), which demuxes two interleaved frames instead of dropping one on resync.
-        if data[:2] == b'\xaa\x55':
-            buf = data
-            while len(buf) >= 6 and buf[0] == 0xaa and buf[1] == 0x55:
-                total = ((buf[2] << 8) | buf[3]) + 6
-                if len(buf) >= total:
-                    self._deliver(buf[:total]); buf = buf[total:]
-                else:
-                    self.rn_pending.append(bytearray(buf))     # start of a multi-notification frame
-                    if len(self.rn_pending) > 8:
-                        self.rn_pending.pop(0)
-                    return
-            if not buf:
-                return
-            data = bytes(buf)
-        if not self.rn_pending:
-            self.say('rnlink resync, dropping %s' % data.hex()); return
-        for i, p in enumerate(self.rn_pending):                # assign to the frame this chunk completes
-            total = ((p[2] << 8) | p[3]) + 6
-            if len(p) + len(data) == total:
-                cand = bytes(p) + data
-                res = rnlink.parse(cand)
-                if res and res[4]:                             # crc_ok -> correct assembly
-                    del self.rn_pending[i]; self._deliver(cand); return
-        p = self.rn_pending[0]; p += data                      # else grow the oldest (multi-continuation)
-        total = ((p[2] << 8) | p[3]) + 6
-        if len(p) >= total:
-            cand = bytes(p[:total]); del self.rn_pending[0]; self._deliver(cand)
+            self.say('raw chunk len=%d %s' % (len(data), bytes(data).hex()))
+        self.reasm.on_chunk(data)
 
     def _deliver(self, frame):
         if self.rn:
@@ -391,6 +358,14 @@ def main():
     c.rn = rnlink.RnlinkPhone(c.say, c.rnlink_send, c)
     c.bredr = bredr.ClassicPhone(c.say); spp_attach(c)
     c.say('waiting for the emulator on port %d' % a.port)
+    # Tests/spare/run.sh stops us with SIGTERM: report frames that never completed before exiting.
+    import signal
+    def _term(*_):
+        try:
+            c.reasm.flush()
+        finally:
+            os._exit(0)
+    signal.signal(signal.SIGTERM, _term)
     # Re-accept across reconnects: a dropped model connection (or a stray probe) must not kill us.
     while True:
         conn, _ = srv.accept()
@@ -426,6 +401,7 @@ def main():
                 f.write(reply + '\n'); f.flush()
             except (BrokenPipeError, OSError):
                 break
+        c.reasm.flush()
         c.say('emulator disconnected, waiting again')
 
 

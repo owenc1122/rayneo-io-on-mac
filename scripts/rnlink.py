@@ -525,6 +525,31 @@ class RnlinkPhone:
         self.tx(0x0d, pb_msg(self.ASSIST_NLP_DONE, message=json.dumps(
             {'sid': sid, 'text': answer, 'isFinal': True, 'final': True})))
 
+    @staticmethod
+    def sge1_line(text):
+        """`SGE1 event=<n> caps=<b12>.<b16..b19> len=<n> raw=<hex>` for a glasses event (docs/peer-log.md), else None.
+
+        Any LAUNCHER_CMD JSON whose payload.data is hex starting with 'SGE1' (cmd spare_ai_v1 today). Capability
+        bytes as the Spare app reads them (ios-next Assistant.swift): byte 12 (capability one; on events 4-6 it is
+        the echoed seq), 16 (two), 17 (three), 18 / 19 (event 16: extended / extended 2); '--' past the end."""
+        import json
+        try:
+            m = json.loads(text)
+            raw = bytes.fromhex(m['payload']['data'])
+        except Exception:
+            return None
+        if raw[:4] != b'SGE1' or len(raw) < 6:
+            return None
+        cap = lambda i: '%02x' % raw[i] if i < len(raw) else '--'
+        return 'SGE1 event=%d caps=%s.%s len=%d raw=%s' % (
+            raw[5], cap(12), ''.join(cap(i) for i in range(16, 20)), len(raw), raw.hex())
+
+    def log_sge1(self, text):
+        if 'SGE1' in text or '53474531' in text:
+            line = self.sge1_line(text)
+            if line:
+                self.say(line)
+
     def on_feature(self, business, payload):
         pb = pb_decode(payload)
         typ = pb.get(2)
@@ -534,6 +559,8 @@ class RnlinkPhone:
         except Exception:
             text = msg.hex()
         self.say('rnlink %s type=%s msg=%s' % (BUSINESS.get(business, hex(business)), typ, text))
+        if business == 0x0f:
+            self.log_sge1(text)
         if business == 0x0e and typ == 1 and __import__('os').environ.get('REC_ACK'):
             # REC_ACK=<type>: research probe, acknowledge the glasses' recorder start (RECORD_CMD) like a phone would.
             import json

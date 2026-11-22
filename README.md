@@ -38,6 +38,7 @@ SIGN_IDENTITY="Developer ID Application: <名字> (<TEAMID>)" NOTARY_PROFILE=ray
 python3 scripts/ble-peer.py --port 23600 --log peer.log &
 sh scripts/emulate.sh /path/to/StrixOS-1.0.4.12 40 .local/runs/ble "$PWD/Tests/scenarios/ble-peer.resc"
 ```
+peer.log 各行格式（含 SGE1 事件行）见 [docs/peer-log.md](docs/peer-log.md)；拼帧自测 `python3 Tests/spare/test_reasm.py`。
 声音（见下文「音频」）：命令行运行时，原固件播放的声音写到输出目录的 `speaker.raw`（48 kHz 立体声 s16le），`MIC=<wav>` 指定录音输入；`python3 scripts/check-audio.py <输出目录> [mic.wav]` 把两者转成 WAV 并给出电平和相关性。Mac 应用直接用 Mac 的麦克风和扬声器（首次会请求麦克风权限）。
 
 应用首次启动会弹窗让你选择固件文件夹，可在「固件」菜单里重新选择或指定字体文件夹。键盘：空格单击、D 双击、L 长按、↑/↓ 或滚轮旋转表冠；H 进入头部控制（鼠标拖动转头/抬头低头，实时驱动 IMU，`headMotion Look <pitch> <yaw>`），R 回正；⌘S 保存眼镜截图。窗口只显示一个画面（两眼画面相同，取两眼较亮者）；固件息屏时提示按空格唤醒。生成的闪存/NAND 镜像和日志放在 `~/Library/Application Support/RayNeo io on Mac/runs/`，只保留最近 5 次。
