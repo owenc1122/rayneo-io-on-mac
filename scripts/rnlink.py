@@ -254,6 +254,51 @@ class RnlinkPhone:
         while getattr(self, 'later_files', None) and self.later_files[0][0] <= self.evt:
             _, name, data = self.later_files.pop(0)
             self.ft.send_file(0x12, name, data)
+        while getattr(self, 'bench_q', None) and self.bench_q[0][0] <= self.evt:
+            self.bench_step(self.bench_q.pop(0)[1])
+
+    # ---- SPARE_SCRIPT: timed phone actions for the Spare verification bench (Tests/spare/) ----
+    # SPARE_SCRIPT=<json list>; each step {"at": <seconds of emulated time after auth>, ...} and one of
+    #   "notif": {title, content, app, appid, subtitle, uid, type(1 add / 2 remove / 3 update), category}
+    #            -> rnlink business 0x15 (the Android-role notification channel the stock card renders)
+    #   "raw":  "<hex>" or "@<file>"   -> raw business-15 message (SGA1 / SGN1 / SGI1 ... as the Spare App bridge sends)
+    #   "file": {"name": "spare-nav.sgn", "path": "<file>"} -> rnlink file channel (business 0x12)
+    #   "setting": {"key": ..., "value"/"data": ...} -> general_setting push
+    # Each step is logged as "BENCH t=<s> evt=<n> ..." so frames can be lined up with it.
+    def bench_load(self):
+        import json
+        path = os.environ.get('SPARE_SCRIPT')
+        if not path:
+            return
+        steps = json.load(open(path))
+        self.bench_q = sorted([(self.evt + 1 + int(float(st['at']) * 1000 / 30), st) for st in steps], key=lambda x: x[0])
+        self.bench_evt0 = self.evt
+        self.say('BENCH loaded %d steps from %s' % (len(steps), path))
+
+    def bench_step(self, st):
+        t = (self.evt - self.bench_evt0) * 0.03
+        if 'notif' in st:
+            n = dict(st['notif'])
+            self.say('BENCH t=%.2f evt=%d notif uid=%s type=%s' % (t, self.evt, n.get('uid'), n.get('type', 1)))
+            self.push_notification(0x15, n.get('title', ''), n.get('content', ''), app=n.get('app', 'WhatsApp'),
+                                   appid=n.get('appid', 'com.whatsapp'), subtitle=n.get('subtitle', ''),
+                                   uid=str(n.get('uid', '1')), category=int(n.get('category', 0)),
+                                   ntype=int(n.get('type', 1)), phone_number=n.get('phone', ''))
+        elif 'raw' in st:
+            r = st['raw']
+            data = open(r[1:], 'rb').read() if r.startswith('@') else bytes.fromhex(r)
+            self.say('BENCH t=%.2f evt=%d raw b15 %d B %s' % (t, self.evt, len(data), data[:8].hex()))
+            self.tx(0x0f, data)
+        elif 'file' in st:
+            f = st['file']
+            self.say('BENCH t=%.2f evt=%d file %s' % (t, self.evt, f['name']))
+            self.ft.send_file(0x12, f['name'], open(f['path'], 'rb').read())
+        elif 'setting' in st:
+            g = dict(st['setting']); k = g.pop('key')
+            self.say('BENCH t=%.2f evt=%d setting %s %s' % (t, self.evt, k, g))
+            self.push_general_setting(k, **g)
+        else:
+            self.say('BENCH t=%.2f evt=%d marker %s' % (t, self.evt, st.get('mark', '')))
 
     def tx(self, business, payload, ctrl=0):
         self.send(frame(business, payload, ctrl=ctrl))
@@ -913,6 +958,7 @@ class RnlinkPhone:
                         self.later_files.append((self.evt + 1 + int(k * every * 1000 / 30), name, open(path, 'rb').read()))
                     else:
                         self.ft.send_file(0x12, name, open(path, 'rb').read())
+                self.bench_load()
                 if self.ota_dir:
                     self.start_ota()
                 if getattr(self, 'notif_demo', False):
